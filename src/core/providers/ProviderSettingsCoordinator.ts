@@ -223,9 +223,14 @@ export class ProviderSettingsCoordinator {
 
     const shouldPreferCurrentProjection = providerId === getSettingsProviderId(settings);
     const currentModelRaw = typeof settings.model === 'string' ? settings.model : '';
+    const normalizedCurrentModel = currentModelRaw
+      ? normalizeProviderModel(uiConfig, settings, currentModelRaw)
+      : undefined;
     const currentModel = shouldPreferCurrentProjection
-      ? (normalizeProviderModel(uiConfig, settings, currentModelRaw) ?? '')
-      : currentModelRaw;
+      ? (normalizedCurrentModel ?? '')
+      : (uiConfig.ownsModel(currentModelRaw, settings)
+        ? (normalizedCurrentModel ?? currentModelRaw)
+        : currentModelRaw);
     const currentEffort = typeof settings.effortLevel === 'string' ? settings.effortLevel : undefined;
     const currentServiceTier = typeof settings.serviceTier === 'string' ? settings.serviceTier : undefined;
     const currentBudget = typeof settings.thinkingBudget === 'string' ? settings.thinkingBudget : undefined;

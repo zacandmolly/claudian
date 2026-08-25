@@ -22,9 +22,17 @@ import {
   wireTabInputEvents,
 } from '@/features/chat/tabs/Tab';
 import {
+  DEFAULT_CODEX_MINI_MODEL,
+  DEFAULT_CODEX_MINI_MODEL_LABEL,
   DEFAULT_CODEX_PRIMARY_MODEL,
   DEFAULT_CODEX_PRIMARY_MODEL_LABEL,
 } from '@/providers/codex/types/models';
+import {
+  CLAUDE_PROVIDER_ICON,
+  DEEPSEEK_PROVIDER_ICON,
+  KIMI_PROVIDER_ICON,
+  OPENROUTER_PROVIDER_ICON,
+} from '@/shared/icons';
 import * as envUtils from '@/utils/env';
 
 // Mock ResizeObserver (not available in jsdom)
@@ -3507,8 +3515,123 @@ describe('Tab - Blank Tab Model Selector', () => {
 
     const result = getBlankTabModelOptions({ codexEnabled: true });
     expect(result).toEqual([
-      ...codexModels.map(m => ({ ...m, group: 'Codex' })),
+      ...codexModels.map(m => ({ ...m, group: 'GPT' })),
       ...claudeModels.map(m => ({ ...m, group: 'Claude' })),
+    ]);
+  });
+
+  it('merges duplicate Claude gateway GPT models into the Codex-backed GPT section', () => {
+    const codexModels = [
+      { value: DEFAULT_CODEX_MINI_MODEL, label: DEFAULT_CODEX_MINI_MODEL_LABEL },
+      { value: DEFAULT_CODEX_PRIMARY_MODEL, label: DEFAULT_CODEX_PRIMARY_MODEL_LABEL },
+    ];
+    const claudeModels = [
+      { value: 'openai/gpt-5.4-mini', label: 'GPT-5.4 Mini', group: 'GPT' },
+      { value: 'moonshotai/kimi-k2.7-code', label: 'Kimi 2.7 Coding', group: 'Kimi' },
+      { value: 'anthropic/claude-fable-5', label: 'Fable 5', group: 'OpenRouter' },
+    ];
+
+    jest.spyOn(ProviderRegistry, 'getEnabledProviderIds').mockReturnValue(['codex', 'claude']);
+    jest.spyOn(ProviderRegistry, 'getProviderDisplayName').mockImplementation((providerId) => (
+      providerId === 'codex' ? 'Codex' : 'Claude'
+    ));
+    jest.spyOn(ProviderRegistry, 'getChatUIConfig').mockImplementation((providerId?: string) => ({
+      getModelOptions: () => providerId === 'codex' ? codexModels : claudeModels,
+      getProviderIcon: jest.fn().mockReturnValue(null),
+    } as any));
+
+    const result = getBlankTabModelOptions({ codexEnabled: true });
+    expect(result).toEqual([
+      { value: DEFAULT_CODEX_MINI_MODEL, label: DEFAULT_CODEX_MINI_MODEL_LABEL, group: 'GPT' },
+      { value: DEFAULT_CODEX_PRIMARY_MODEL, label: DEFAULT_CODEX_PRIMARY_MODEL_LABEL, group: 'GPT' },
+      {
+        value: 'moonshotai/kimi-k2.7-code',
+        label: 'Kimi 2.7 Coding',
+        group: 'Kimi',
+        providerIcon: KIMI_PROVIDER_ICON,
+      },
+      {
+        value: 'anthropic/claude-fable-5',
+        label: 'Fable 5',
+        group: 'OpenRouter',
+        providerIcon: OPENROUTER_PROVIDER_ICON,
+      },
+    ]);
+  });
+
+  it('preserves per-model provider icons in the mixed blank-tab selector', () => {
+    const claudeModels = [
+      {
+        value: 'moonshotai/kimi-k2.7-code',
+        label: 'Kimi 2.7 Coding',
+        providerIcon: KIMI_PROVIDER_ICON,
+      },
+    ];
+    jest.spyOn(ProviderRegistry, 'getEnabledProviderIds').mockReturnValue(['claude']);
+    jest.spyOn(ProviderRegistry, 'getProviderDisplayName').mockReturnValue('Claude');
+    jest.spyOn(ProviderRegistry, 'getChatUIConfig').mockReturnValue({
+      getModelOptions: () => claudeModels,
+      getProviderIcon: jest.fn().mockReturnValue(CLAUDE_PROVIDER_ICON),
+    } as any);
+
+    const result = getBlankTabModelOptions({});
+    expect(result).toEqual([
+      {
+        value: 'moonshotai/kimi-k2.7-code',
+        label: 'Kimi 2.7 Coding',
+        group: 'Kimi',
+        providerIcon: KIMI_PROVIDER_ICON,
+      },
+    ]);
+  });
+
+  it('groups DeepSeek models under DeepSeek in the mixed blank-tab selector', () => {
+    const claudeModels = [
+      {
+        value: 'deepseek-v4-pro[1m]',
+        label: 'DeepSeek V4 Pro',
+      },
+    ];
+    jest.spyOn(ProviderRegistry, 'getEnabledProviderIds').mockReturnValue(['claude']);
+    jest.spyOn(ProviderRegistry, 'getProviderDisplayName').mockReturnValue('Claude');
+    jest.spyOn(ProviderRegistry, 'getChatUIConfig').mockReturnValue({
+      getModelOptions: () => claudeModels,
+      getProviderIcon: jest.fn().mockReturnValue(CLAUDE_PROVIDER_ICON),
+    } as any);
+
+    const result = getBlankTabModelOptions({});
+    expect(result).toEqual([
+      {
+        value: 'deepseek-v4-pro[1m]',
+        label: 'DeepSeek V4 Pro',
+        group: 'DeepSeek',
+        providerIcon: DEEPSEEK_PROVIDER_ICON,
+      },
+    ]);
+  });
+
+  it('groups OpenRouter Claude latest aliases under OpenRouter in the mixed blank-tab selector', () => {
+    const claudeModels = [
+      {
+        value: '~anthropic/claude-opus-latest',
+        label: 'Claude Opus Latest',
+      },
+    ];
+    jest.spyOn(ProviderRegistry, 'getEnabledProviderIds').mockReturnValue(['claude']);
+    jest.spyOn(ProviderRegistry, 'getProviderDisplayName').mockReturnValue('Claude');
+    jest.spyOn(ProviderRegistry, 'getChatUIConfig').mockReturnValue({
+      getModelOptions: () => claudeModels,
+      getProviderIcon: jest.fn().mockReturnValue(CLAUDE_PROVIDER_ICON),
+    } as any);
+
+    const result = getBlankTabModelOptions({});
+    expect(result).toEqual([
+      {
+        value: '~anthropic/claude-opus-latest',
+        label: 'Claude Opus Latest',
+        group: 'OpenRouter',
+        providerIcon: OPENROUTER_PROVIDER_ICON,
+      },
     ]);
   });
 });

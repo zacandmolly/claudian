@@ -50,7 +50,7 @@ function formatClaudeCustomModelLabel(labelSource: string): string | null {
   const candidate = claudePrefixIndex >= 0 ? without1M.slice(claudePrefixIndex) : without1M;
 
   const versionedMatch = candidate.match(
-    /^claude-(haiku|sonnet|opus)-(\d+)-(\d+)(?:-(\d{8}))?(?:-v\d+:\d+)?$/i,
+    /^claude-(haiku|sonnet|opus)-(\d+)[-.](\d+)(?:-(\d{8}))?(?:-v\d+:\d+)?$/i,
   );
   if (versionedMatch) {
     const [, family, major, minor, date] = versionedMatch;

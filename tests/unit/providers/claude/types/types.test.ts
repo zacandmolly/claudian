@@ -19,6 +19,7 @@ import {
   getContextWindowSize,
   normalizeEffortLevel,
   normalizeVisibleModelVariant,
+  supportsClaudeAdaptiveThinking,
   supportsXHighEffort,
 } from '@/providers/claude/types/models';
 import {
@@ -617,6 +618,11 @@ describe('types.ts', () => {
         expect(getContextWindowSize('sonnet[1m]')).toBe(CONTEXT_WINDOW_1M);
       });
 
+      it('should return 1M context window for Opus 4.8 model ids', () => {
+        expect(getContextWindowSize('claude-opus-4-8')).toBe(CONTEXT_WINDOW_1M);
+        expect(getContextWindowSize('anthropic/claude-opus-4.8')).toBe(CONTEXT_WINDOW_1M);
+      });
+
       it('should treat [1M] and [1m] suffixes equivalently', () => {
         expect(getContextWindowSize('opus[1M]')).toBe(CONTEXT_WINDOW_1M);
         expect(getContextWindowSize('claude-opus-4-6[1M]')).toBe(CONTEXT_WINDOW_1M);
@@ -647,22 +653,22 @@ describe('types.ts', () => {
     describe('filterVisibleModelOptions', () => {
       it('should hide 1M variants when toggles are disabled', () => {
         const models = filterVisibleModelOptions(DEFAULT_CLAUDE_MODELS, false, false).map((model) => model.value);
-        expect(models).toEqual(['haiku', 'sonnet', 'opus']);
+        expect(models).toEqual(['haiku', 'sonnet', 'opus', 'claude-opus-4-8']);
       });
 
       it('should swap in 1M variants when toggles are enabled', () => {
         const models = filterVisibleModelOptions(DEFAULT_CLAUDE_MODELS, true, true).map((model) => model.value);
-        expect(models).toEqual(['haiku', 'sonnet[1m]', 'opus[1m]']);
+        expect(models).toEqual(['haiku', 'sonnet[1m]', 'opus[1m]', 'claude-opus-4-8']);
       });
 
       it('should swap only opus when enableOpus1M is true and enableSonnet1M is false', () => {
         const models = filterVisibleModelOptions(DEFAULT_CLAUDE_MODELS, true, false).map((model) => model.value);
-        expect(models).toEqual(['haiku', 'sonnet', 'opus[1m]']);
+        expect(models).toEqual(['haiku', 'sonnet', 'opus[1m]', 'claude-opus-4-8']);
       });
 
       it('should swap only sonnet when enableSonnet1M is true and enableOpus1M is false', () => {
         const models = filterVisibleModelOptions(DEFAULT_CLAUDE_MODELS, false, true).map((model) => model.value);
-        expect(models).toEqual(['haiku', 'sonnet[1m]', 'opus']);
+        expect(models).toEqual(['haiku', 'sonnet[1m]', 'opus', 'claude-opus-4-8']);
       });
     });
 
@@ -693,6 +699,8 @@ describe('types.ts', () => {
       expect(supportsXHighEffort('opus[1m]')).toBe(true);
       expect(supportsXHighEffort('opus[1M]')).toBe(true);
       expect(supportsXHighEffort('claude-opus-4-7')).toBe(true);
+      expect(supportsXHighEffort('claude-opus-4-8')).toBe(true);
+      expect(supportsXHighEffort('anthropic/claude-opus-4.8')).toBe(true);
       expect(supportsXHighEffort('claude-opus-5')).toBe(true);
     });
 
@@ -700,6 +708,32 @@ describe('types.ts', () => {
       expect(supportsXHighEffort('sonnet')).toBe(false);
       expect(supportsXHighEffort('claude-sonnet-4-5')).toBe(false);
       expect(supportsXHighEffort('claude-opus-4-6')).toBe(false);
+      expect(supportsXHighEffort('deepseek-v4-pro[1m]')).toBe(false);
+    });
+  });
+
+  describe('supportsClaudeAdaptiveThinking', () => {
+    it('returns true for built-in aliases and Claude provider slugs', () => {
+      expect(supportsClaudeAdaptiveThinking('sonnet')).toBe(true);
+      expect(supportsClaudeAdaptiveThinking('opus[1m]')).toBe(true);
+      expect(supportsClaudeAdaptiveThinking('anthropic/claude-opus-4.8')).toBe(true);
+      expect(supportsClaudeAdaptiveThinking('anthropic/claude-fable-5')).toBe(true);
+    });
+
+    it('preserves adaptive thinking for unqualified custom model ids', () => {
+      expect(supportsClaudeAdaptiveThinking('custom-model')).toBe(true);
+    });
+
+    it('keeps adaptive thinking for DeepSeek custom model ids', () => {
+      expect(supportsClaudeAdaptiveThinking('deepseek-v4-pro[1m]')).toBe(true);
+      expect(supportsClaudeAdaptiveThinking('deepseek/deepseek-v4-pro')).toBe(true);
+      expect(supportsClaudeAdaptiveThinking('deepseek-v4-flash-vision-exp')).toBe(true);
+    });
+
+    it('returns false for explicitly non-Claude OpenRouter slugs', () => {
+      expect(supportsClaudeAdaptiveThinking('openai/gpt-5.4-mini')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('moonshotai/kimi-k2.7-code')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('openrouter/fusion')).toBe(false);
     });
   });
 
@@ -717,6 +751,15 @@ describe('types.ts', () => {
     it('falls back to high for unknown or missing effort values', () => {
       expect(normalizeEffortLevel('claude-sonnet-4-5', 'invalid')).toBe('high');
       expect(normalizeEffortLevel('claude-sonnet-4-5', undefined)).toBe('high');
+    });
+
+    it('maps DeepSeek compatibility aliases to real effort levels', () => {
+      expect(normalizeEffortLevel('deepseek-v4-pro[1m]', 'low')).toBe('high');
+      expect(normalizeEffortLevel('deepseek-v4-pro[1m]', 'medium')).toBe('high');
+      expect(normalizeEffortLevel('deepseek-v4-pro[1m]', 'xhigh')).toBe('high');
+      expect(normalizeEffortLevel('deepseek-v4-pro[1m]', 'max')).toBe('max');
+      expect(normalizeEffortLevel('deepseek-v4-flash-vision-exp', 'medium')).toBe('high');
+      expect(normalizeEffortLevel('deepseek-v4-flash-vision-exp', 'max')).toBe('max');
     });
   });
 });

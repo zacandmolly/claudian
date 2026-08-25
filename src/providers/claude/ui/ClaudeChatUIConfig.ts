@@ -15,6 +15,7 @@ import {
   getContextWindowSize,
   normalizeEffortLevel,
   normalizeVisibleModelVariant,
+  supportsClaudeAdaptiveThinking,
   supportsXHighEffort,
 } from '../types/models';
 
@@ -36,11 +37,21 @@ export const claudeChatUIConfig: ProviderChatUIConfig = {
     return getClaudeModelOptions(settings).some((option: ProviderUIOption) => option.value === model);
   },
 
-  isAdaptiveReasoningModel(_model: string, _settings: Record<string, unknown>): boolean {
-    return true;
+  isAdaptiveReasoningModel(model: string, _settings: Record<string, unknown>): boolean {
+    return supportsClaudeAdaptiveThinking(model);
   },
 
   getReasoningOptions(model: string, _settings: Record<string, unknown>): ProviderReasoningOption[] {
+    if (!supportsClaudeAdaptiveThinking(model)) {
+      return [];
+    }
+
+    if (model.toLowerCase().includes('deepseek')) {
+      return EFFORT_LEVELS
+        .filter(e => e.value === 'high' || e.value === 'max')
+        .map(e => ({ value: e.value, label: e.label }));
+    }
+
     const levels = supportsXHighEffort(model)
       ? EFFORT_LEVELS
       : EFFORT_LEVELS.filter(e => e.value !== 'xhigh');

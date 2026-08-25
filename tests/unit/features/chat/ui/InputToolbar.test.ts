@@ -1,5 +1,6 @@
 import { createMockEl } from '@test/helpers/mockElement';
 
+import type { ProviderIconSvg } from '@/core/providers/types';
 import type { UsageInfo } from '@/core/types';
 import {
   ContextUsageMeter,
@@ -15,6 +16,13 @@ import {
   DEFAULT_CODEX_PRIMARY_MODEL,
   DEFAULT_CODEX_PRIMARY_MODEL_LABEL,
 } from '@/providers/codex/types/models';
+import {
+  CLAUDE_PROVIDER_ICON,
+  DEEPSEEK_PROVIDER_ICON,
+  KIMI_PROVIDER_ICON,
+  OPENAI_PROVIDER_ICON,
+  OPENROUTER_PROVIDER_ICON,
+} from '@/shared/icons';
 
 jest.mock('obsidian', () => ({
   Notice: jest.fn(),
@@ -57,6 +65,14 @@ const BUDGET_OPTIONS = [
 ];
 
 const DEFAULT_MODEL_VALUES = new Set(DEFAULT_MODELS.map(m => m.value));
+
+function firstProviderIconPath(icon: ProviderIconSvg): string {
+  if (icon.kind === 'composite') {
+    return icon.children[0].attributes.d;
+  }
+
+  return icon.path;
+}
 
 function filterVisibleModels(
   models: typeof DEFAULT_MODELS,
@@ -351,6 +367,41 @@ describe('ModelSelector', () => {
     expect(options.find((o: any) => o.children[0]?.textContent === 'Opus')).toBeUndefined();
     expect(options.find((o: any) => o.children[0]?.textContent === 'Sonnet')).toBeUndefined();
     expect(parentEl.querySelector('.claudian-model-label')?.textContent).toBe('Opus 1M');
+  });
+
+  it('falls back to provider-specific icons from provider-qualified model ids', () => {
+    const uiConfig = createMockUIConfig();
+    uiConfig.getModelOptions.mockReturnValue([
+      { value: 'openai/gpt-5.5', label: 'GPT-5.5' },
+      { value: 'moonshotai/kimi-k2.7-code', label: 'Kimi 2.7 Coding' },
+      { value: 'openrouter/fusion', label: 'OpenRouter Fusion' },
+      { value: 'deepseek-v4-pro[1m]', label: 'DeepSeek V4 Pro' },
+      { value: 'anthropic/claude-opus-4.8', label: 'OpenRouter Opus 4.8' },
+      { value: 'claude-opus-4-8', label: 'WoWCode Opus 4.8' },
+    ]);
+    (uiConfig as any).getProviderIcon = jest.fn().mockReturnValue(CLAUDE_PROVIDER_ICON);
+
+    callbacks.getUIConfig.mockReturnValue(uiConfig);
+    selector.renderOptions();
+
+    const dropdown = parentEl.querySelector('.claudian-model-dropdown');
+    const options = dropdown?.children || [];
+    const iconPathByLabel = new Map(
+      options.map((option: any) => {
+        const label = option.children.find((child: any) => child.tagName === 'SPAN')?.textContent;
+        const icon = option.children.find((child: any) => child.tagName === 'SVG');
+        const firstPath = Array.from(icon?.children ?? [])
+          .find((child: any) => child.tagName === 'path' || child.tagName === 'PATH') as any;
+        return [label, firstPath?.getAttribute('d')];
+      })
+    );
+
+    expect(iconPathByLabel.get('GPT-5.5')).toBe(firstProviderIconPath(OPENAI_PROVIDER_ICON));
+    expect(iconPathByLabel.get('Kimi 2.7 Coding')).toBe(firstProviderIconPath(KIMI_PROVIDER_ICON));
+    expect(iconPathByLabel.get('OpenRouter Fusion')).toBe(firstProviderIconPath(OPENROUTER_PROVIDER_ICON));
+    expect(iconPathByLabel.get('DeepSeek V4 Pro')).toBe(firstProviderIconPath(DEEPSEEK_PROVIDER_ICON));
+    expect(iconPathByLabel.get('OpenRouter Opus 4.8')).toBe(firstProviderIconPath(OPENROUTER_PROVIDER_ICON));
+    expect(iconPathByLabel.get('WoWCode Opus 4.8')).toBe(firstProviderIconPath(CLAUDE_PROVIDER_ICON));
   });
 });
 

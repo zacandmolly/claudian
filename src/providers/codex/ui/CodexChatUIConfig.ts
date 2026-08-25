@@ -12,7 +12,12 @@ import {
   DEFAULT_CODEX_MODEL_SET,
   DEFAULT_CODEX_PRIMARY_MODEL,
   FAST_TIER_CODEX_DESCRIPTION,
-  FAST_TIER_CODEX_MODEL,
+  getCodexContextWindowSize,
+  getCodexReasoningEfforts,
+  getDefaultCodexReasoningEffort,
+  isCodexRoutableModel,
+  normalizeCodexModelId,
+  supportsCodexFastTier,
 } from '../types/models';
 
 const EFFORT_LEVELS: ProviderReasoningOption[] = [
@@ -20,6 +25,8 @@ const EFFORT_LEVELS: ProviderReasoningOption[] = [
   { value: 'medium', label: 'Medium' },
   { value: 'high', label: 'High' },
   { value: 'xhigh', label: 'XHigh' },
+  { value: 'max', label: 'Max' },
+  { value: 'ultra', label: 'Ultra' },
 ];
 
 const CODEX_PERMISSION_MODE_TOGGLE: ProviderPermissionModeToggleConfig = {
@@ -39,10 +46,8 @@ const CODEX_SERVICE_TIER_TOGGLE: ProviderServiceTierToggleConfig = {
   description: FAST_TIER_CODEX_DESCRIPTION,
 };
 
-const DEFAULT_CONTEXT_WINDOW = 200_000;
-
 function looksLikeCodexModel(model: string): boolean {
-  return /^gpt-/i.test(model) || /^o\d/i.test(model);
+  return isCodexRoutableModel(model);
 }
 
 export const codexChatUIConfig: ProviderChatUIConfig = {
@@ -51,31 +56,34 @@ export const codexChatUIConfig: ProviderChatUIConfig = {
   },
 
   ownsModel(model: string, settings: Record<string, unknown>): boolean {
-    if (getCodexModelOptions(settings).some((option: ProviderUIOption) => option.value === model)) {
+    const normalized = normalizeCodexModelId(model) ?? model;
+    if (getCodexModelOptions(settings).some((option: ProviderUIOption) => option.value === normalized)) {
       return true;
     }
 
-    return looksLikeCodexModel(model);
+    return looksLikeCodexModel(normalized);
   },
 
   isAdaptiveReasoningModel(_model: string, _settings: Record<string, unknown>): boolean {
     return true;
   },
 
-  getReasoningOptions(_model: string, _settings: Record<string, unknown>): ProviderReasoningOption[] {
-    return [...EFFORT_LEVELS];
+  getReasoningOptions(model: string, _settings: Record<string, unknown>): ProviderReasoningOption[] {
+    const supportedEfforts = new Set(getCodexReasoningEfforts(model));
+    return EFFORT_LEVELS.filter(option => supportedEfforts.has(option.value));
   },
 
-  getDefaultReasoningValue(_model: string, _settings: Record<string, unknown>): string {
-    return 'medium';
+  getDefaultReasoningValue(model: string, _settings: Record<string, unknown>): string {
+    return getDefaultCodexReasoningEffort(model);
   },
 
-  getContextWindowSize(): number {
-    return DEFAULT_CONTEXT_WINDOW;
+  getContextWindowSize(model: string): number {
+    return getCodexContextWindowSize(model);
   },
 
   isDefaultModel(model: string): boolean {
-    return DEFAULT_CODEX_MODEL_SET.has(model);
+    const normalized = normalizeCodexModelId(model) ?? model;
+    return DEFAULT_CODEX_MODEL_SET.has(normalized);
   },
 
   applyModelDefaults(model: string, settings: unknown): void {
@@ -87,8 +95,9 @@ export const codexChatUIConfig: ProviderChatUIConfig = {
   },
 
   normalizeModelVariant(model: string, settings: Record<string, unknown>): string {
-    if (getCodexModelOptions(settings).some((option) => option.value === model)) {
-      return model;
+    const normalized = normalizeCodexModelId(model) ?? model;
+    if (getCodexModelOptions(settings).some((option) => option.value === normalized)) {
+      return normalized;
     }
 
     return DEFAULT_CODEX_PRIMARY_MODEL;
@@ -96,8 +105,9 @@ export const codexChatUIConfig: ProviderChatUIConfig = {
 
   getCustomModelIds(envVars: Record<string, string>): Set<string> {
     const ids = new Set<string>();
-    if (envVars.OPENAI_MODEL && !DEFAULT_CODEX_MODEL_SET.has(envVars.OPENAI_MODEL)) {
-      ids.add(envVars.OPENAI_MODEL);
+    const normalized = normalizeCodexModelId(envVars.OPENAI_MODEL);
+    if (normalized && !DEFAULT_CODEX_MODEL_SET.has(normalized)) {
+      ids.add(normalized);
     }
     return ids;
   },
@@ -107,7 +117,9 @@ export const codexChatUIConfig: ProviderChatUIConfig = {
   },
 
   getServiceTierToggle(settings): ProviderServiceTierToggleConfig | null {
-    return settings.model === FAST_TIER_CODEX_MODEL ? CODEX_SERVICE_TIER_TOGGLE : null;
+    return supportsCodexFastTier(settings.model as string | undefined)
+      ? CODEX_SERVICE_TIER_TOGGLE
+      : null;
   },
 
   getProviderIcon() {

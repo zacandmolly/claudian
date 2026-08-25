@@ -104,7 +104,9 @@ export interface PersistentQueryConfig {
   disallowedToolsKey: string;
   mcpServersKey: string;
   pluginsKey: string;
+  environmentKey?: string;
   externalContextPaths: string[];
+  adaptiveThinking: boolean;
   settingSources: string;
   claudeCliPath: string;
   enableChrome: boolean;

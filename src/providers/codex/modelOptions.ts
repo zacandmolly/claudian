@@ -6,6 +6,7 @@ import {
   DEFAULT_CODEX_MODELS,
   DEFAULT_CODEX_PRIMARY_MODEL,
   formatCodexModelLabel,
+  normalizeCodexModelId,
 } from './types/models';
 
 function createCustomCodexModelOption(modelId: string, description: string): ProviderUIOption {
@@ -18,7 +19,7 @@ function createCustomCodexModelOption(modelId: string, description: string): Pro
 
 function getConfiguredEnvModel(settings: Record<string, unknown>): string | null {
   const modelId = getRuntimeEnvironmentVariables(settings, 'codex').OPENAI_MODEL?.trim();
-  return modelId ? modelId : null;
+  return modelId ? normalizeCodexModelId(modelId) ?? null : null;
 }
 
 export function getConfiguredEnvCustomModel(settings: Record<string, unknown>): string | null {
@@ -31,7 +32,7 @@ export function parseConfiguredCustomModelIds(value: string): string[] {
   const seen = new Set<string>();
 
   for (const line of value.split(/\r?\n/)) {
-    const modelId = line.trim();
+    const modelId = normalizeCodexModelId(line.trim()) ?? '';
     if (!modelId || seen.has(modelId)) {
       continue;
     }

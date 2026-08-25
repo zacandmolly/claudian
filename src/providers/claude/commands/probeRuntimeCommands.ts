@@ -48,7 +48,6 @@ export async function probeRuntimeCommands(plugin: ClaudianPlugin): Promise<Slas
   let commands: SlashCommand[] = [];
   const extraArgs = {
     ...(claudeSettings.safeMode === 'auto' ? { 'enable-auto-mode': null } : {}),
-    ...(claudeSettings.enableChrome ? { chrome: null } : {}),
   };
 
   try {

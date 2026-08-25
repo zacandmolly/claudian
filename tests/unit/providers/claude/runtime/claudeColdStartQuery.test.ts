@@ -34,7 +34,7 @@ jest.mock('@/core/providers/ProviderSettingsCoordinator', () => ({
 }));
 
 const { getVaultPath } = jest.requireMock('@/utils/path');
-const { getMissingNodeError } = jest.requireMock('@/utils/env');
+const { getMissingNodeError, parseEnvironmentVariables } = jest.requireMock('@/utils/env');
 
 function createMockPlugin(overrides?: Partial<ColdStartQueryConfig['plugin']>) {
   return {
@@ -60,6 +60,7 @@ beforeEach(() => {
   sdkMock.resetMockMessages();
   (getVaultPath as jest.Mock).mockReturnValue('/test/vault');
   (getMissingNodeError as jest.Mock).mockReturnValue(null);
+  (parseEnvironmentVariables as jest.Mock).mockReturnValue({ PATH: '/usr/bin' });
 });
 
 describe('runColdStartQuery', () => {
@@ -218,6 +219,134 @@ describe('runColdStartQuery', () => {
       expect(opts?.maxThinkingTokens).toBeUndefined();
     });
 
+    it('does not set adaptive thinking for explicitly non-Claude OpenRouter slugs', async () => {
+      sdkMock.setMockMessages([]);
+
+      await runColdStartQuery(
+        createConfig({
+          model: 'moonshotai/kimi-k2.7-code',
+        }),
+        'hi',
+      );
+
+      const opts = sdkMock.getLastOptions();
+      expect(opts?.model).toBe('moonshotai/kimi-k2.7-code');
+      expect(opts?.thinking).toBeUndefined();
+      expect(opts?.effort).toBeUndefined();
+      expect(opts?.maxThinkingTokens).toBeUndefined();
+    });
+
+    it('routes OpenRouter group models to the OpenRouter snippet environment', async () => {
+      sdkMock.setMockMessages([]);
+      (parseEnvironmentVariables as jest.Mock).mockImplementation((text: string) => {
+        if (text.includes('openrouter.ai')) {
+          return {
+            ANTHROPIC_BASE_URL: 'https://openrouter.ai/api',
+            ANTHROPIC_AUTH_TOKEN: 'openrouter-token',
+            ANTHROPIC_API_KEY: '',
+          };
+        }
+        return {
+          PATH: '/usr/bin',
+          ANTHROPIC_BASE_URL: 'https://wowcode.cc/',
+          ANTHROPIC_AUTH_TOKEN: 'wowcode-token',
+        };
+      });
+
+      await runColdStartQuery(
+        createConfig({
+          providerSettings: {
+            model: '~anthropic/claude-haiku-latest',
+            envSnippets: [
+              {
+                id: 'claude-openrouter-official',
+                name: 'OpenRouter official route',
+                description: 'OpenRouter route',
+                scope: 'provider:claude',
+                envVars: 'ANTHROPIC_BASE_URL=https://openrouter.ai/api\nANTHROPIC_AUTH_TOKEN=openrouter-token\nANTHROPIC_API_KEY=',
+              },
+            ],
+          },
+        }),
+        'hi',
+      );
+
+      const opts = sdkMock.getLastOptions();
+      expect(opts?.model).toBe('~anthropic/claude-haiku-latest');
+      expect(opts?.env?.ANTHROPIC_BASE_URL).toBe('https://openrouter.ai/api');
+      expect(opts?.env?.ANTHROPIC_AUTH_TOKEN).toBe('openrouter-token');
+      expect(opts?.thinking).toEqual({ type: 'adaptive' });
+      expect(opts?.effort).toBe('high');
+    });
+
+    it('routes OpenRouter Fable 5 to the OpenRouter snippet environment', async () => {
+      sdkMock.setMockMessages([]);
+      (parseEnvironmentVariables as jest.Mock).mockImplementation((text: string) => {
+        if (text.includes('openrouter.ai')) {
+          return {
+            ANTHROPIC_BASE_URL: 'https://openrouter.ai/api',
+            ANTHROPIC_AUTH_TOKEN: 'openrouter-token',
+            ANTHROPIC_API_KEY: '',
+          };
+        }
+        return {
+          PATH: '/usr/bin',
+          ANTHROPIC_BASE_URL: 'https://wowcode.cc/',
+          ANTHROPIC_AUTH_TOKEN: 'wowcode-token',
+        };
+      });
+
+      await runColdStartQuery(
+        createConfig({
+          providerSettings: {
+            model: 'anthropic/claude-fable-5',
+            envSnippets: [
+              {
+                id: 'claude-openrouter-official',
+                name: 'OpenRouter official route',
+                description: 'OpenRouter route',
+                scope: 'provider:claude',
+                envVars: 'ANTHROPIC_BASE_URL=https://openrouter.ai/api\nANTHROPIC_AUTH_TOKEN=openrouter-token\nANTHROPIC_API_KEY=',
+              },
+            ],
+          },
+        }),
+        'hi',
+      );
+
+      const opts = sdkMock.getLastOptions();
+      expect(opts?.model).toBe('anthropic/claude-fable-5');
+      expect(opts?.env?.ANTHROPIC_BASE_URL).toBe('https://openrouter.ai/api');
+      expect(opts?.env?.ANTHROPIC_AUTH_TOKEN).toBe('openrouter-token');
+      expect(opts?.thinking).toEqual({ type: 'adaptive' });
+      expect(opts?.effort).toBe('high');
+    });
+
+    it('sets adaptive thinking for Anthropic slugs routed through OpenRouter', async () => {
+      sdkMock.setMockMessages([]);
+      (parseEnvironmentVariables as jest.Mock).mockReturnValue({
+        PATH: '/usr/bin',
+        ANTHROPIC_BASE_URL: 'https://openrouter.ai/api',
+      });
+
+      await runColdStartQuery(
+        createConfig({
+          providerSettings: {
+            model: 'anthropic/claude-opus-4.8',
+            thinkingBudget: 'high',
+            effortLevel: 'max',
+          },
+        }),
+        'hi',
+      );
+
+      const opts = sdkMock.getLastOptions();
+      expect(opts?.model).toBe('anthropic/claude-opus-4.8');
+      expect(opts?.thinking).toEqual({ type: 'adaptive' });
+      expect(opts?.effort).toBe('max');
+      expect(opts?.maxThinkingTokens).toBeUndefined();
+    });
+
     it('uses provider settings model when no override', async () => {
       sdkMock.setMockMessages([]);
 
@@ -225,6 +354,42 @@ describe('runColdStartQuery', () => {
 
       const opts = sdkMock.getLastOptions();
       expect(opts?.model).toBe('claude-sonnet-4-5');
+    });
+
+    it('normalizes the DeepSeek local 1M marker before calling the SDK', async () => {
+      sdkMock.setMockMessages([]);
+      (parseEnvironmentVariables as jest.Mock).mockImplementation((text: string) => {
+        if (text.includes('api.deepseek.com')) {
+          return {
+            PATH: '/usr/bin',
+            ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
+            ANTHROPIC_MODEL: 'deepseek-v4-pro[1m]',
+          };
+        }
+        return { PATH: '/usr/bin' };
+      });
+
+      await runColdStartQuery(
+        createConfig({
+          model: 'deepseek-v4-pro[1m]',
+          providerSettings: {
+            model: 'deepseek-v4-pro[1m]',
+            effortLevel: 'high',
+            envSnippets: [{
+              id: 'claude-deepseek-v4',
+              name: 'DeepSeek V4 Pro',
+              description: 'DeepSeek route',
+              scope: 'provider:claude',
+              envVars: 'ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic\nANTHROPIC_MODEL=deepseek-v4-pro[1m]',
+            }],
+          },
+        }),
+        'hi',
+      );
+
+      const opts = sdkMock.getLastOptions();
+      expect(opts?.model).toBe('deepseek-v4-pro');
+      expect(opts?.env?.ANTHROPIC_MODEL).toBe('deepseek-v4-pro');
     });
 
     it('loads project and local settings when user settings are disabled', async () => {

@@ -11,6 +11,7 @@ export const DEFAULT_CLAUDE_MODELS: { value: ClaudeModel; label: string; descrip
   { value: 'sonnet[1m]', label: 'Sonnet 1M', description: 'Balanced performance (1M context window)' },
   { value: 'opus', label: 'Opus', description: 'Most capable' },
   { value: 'opus[1m]', label: 'Opus 1M', description: 'Most capable (1M context window)' },
+  { value: 'claude-opus-4-8', label: 'Opus 4.8', description: 'Latest Opus model (1M context window)' },
 ];
 
 /** Effort levels for adaptive thinking models. */
@@ -31,10 +32,17 @@ export const DEFAULT_EFFORT_LEVEL: Record<string, EffortLevel> = {
   'sonnet[1m]': 'high',
   'opus': 'high',
   'opus[1m]': 'high',
+  'claude-opus-4-8': 'high',
 };
 
 const ONE_M_SUFFIX = '[1m]';
 const DEFAULT_MODEL_VALUES = new Set(DEFAULT_CLAUDE_MODELS.map(m => m.value.toLowerCase()));
+const DEFAULT_1M_CONTEXT_MODEL_IDS = new Set([
+  'claude-opus-4-7',
+  'claude-opus-4.7',
+  'claude-opus-4-8',
+  'claude-opus-4.8',
+]);
 
 function normalizeModelId(model: string): string {
   return model.trim().toLowerCase();
@@ -42,6 +50,30 @@ function normalizeModelId(model: string): string {
 
 function has1MContextSuffix(model: string): boolean {
   return normalizeModelId(model).endsWith(ONE_M_SUFFIX);
+}
+
+function getModelSlug(model: string): string {
+  const withoutContextSuffix = normalizeModelId(model).replace(/\[1m\]$/, '');
+  return withoutContextSuffix.split('/').pop() ?? withoutContextSuffix;
+}
+
+function getProviderQualifiedModelParts(model: string): { provider: string; slug: string } | null {
+  const withoutContextSuffix = normalizeModelId(model).replace(/\[1m\]$/, '');
+  const slashIndex = withoutContextSuffix.indexOf('/');
+  if (slashIndex === -1) {
+    return null;
+  }
+
+  return {
+    provider: withoutContextSuffix.slice(0, slashIndex),
+    slug: withoutContextSuffix.slice(slashIndex + 1),
+  };
+}
+
+function isDeepSeekModel(model: string): boolean {
+  const slug = getModelSlug(model);
+  const parts = getProviderQualifiedModelParts(model);
+  return parts?.provider === 'deepseek' || slug.includes('deepseek');
 }
 
 function isBuiltInFamilyVariant(model: string, family: 'sonnet' | 'opus'): boolean {
@@ -83,9 +115,44 @@ export function isDefaultClaudeModel(model: string): boolean {
  * silently falls back to `high` on other models.
  */
 export function supportsXHighEffort(model: string): boolean {
+  if (isDeepSeekModel(model)) {
+    return false;
+  }
+
   const normalized = normalizeModelId(model);
   if (isBuiltInFamilyVariant(normalized, 'opus')) return true;
-  return /claude-opus-(4-[7-9]|[5-9])/.test(normalized);
+  return /claude-opus-(4[-.][7-9]|[5-9])/.test(normalized);
+}
+
+/**
+ * Claude Code adaptive thinking is valid for Claude-family model ids.  Existing
+ * unqualified custom ids stay adaptive for compatibility, while provider-qualified
+ * non-Claude gateway ids such as `openai/...` and `openrouter/...` opt out.
+ */
+export function supportsClaudeAdaptiveThinking(model: string): boolean {
+  const normalized = normalizeModelId(model);
+  if (!normalized) {
+    return false;
+  }
+
+  if (isDeepSeekModel(normalized)) {
+    return true;
+  }
+
+  if (DEFAULT_MODEL_VALUES.has(normalized)) {
+    return true;
+  }
+
+  const parts = getProviderQualifiedModelParts(normalized);
+  if (!parts) {
+    return true;
+  }
+
+  if (parts.provider === 'anthropic') {
+    return true;
+  }
+
+  return parts.slug.startsWith('claude-') || parts.slug.includes('/claude-');
 }
 
 /** Clamp stored effort values to what the selected model actually supports. */
@@ -93,6 +160,10 @@ export function normalizeEffortLevel(
   model: string,
   effortLevel: unknown,
 ): EffortLevel {
+  if (isDeepSeekModel(model)) {
+    return effortLevel === 'max' ? 'max' : 'high';
+  }
+
   const allowsXHigh = supportsXHighEffort(model);
   const isSupported = EFFORT_LEVELS.some((level) =>
     level.value === effortLevel && (allowsXHigh || level.value !== 'xhigh')
@@ -159,6 +230,10 @@ export function getContextWindowSize(
   }
 
   if (has1MContextSuffix(model)) {
+    return CONTEXT_WINDOW_1M;
+  }
+
+  if (DEFAULT_1M_CONTEXT_MODEL_IDS.has(getModelSlug(model))) {
     return CONTEXT_WINDOW_1M;
   }
 

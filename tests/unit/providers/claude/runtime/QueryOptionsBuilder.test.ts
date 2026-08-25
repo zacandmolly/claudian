@@ -72,7 +72,9 @@ function createMockPersistentQueryConfig(
     disallowedToolsKey: '',
     mcpServersKey: '',
     pluginsKey: '',
+    environmentKey: '',
     externalContextPaths: [],
+    adaptiveThinking: true,
     settingSources: 'project,local',
     claudeCliPath: '/mock/claude',
     enableChrome: false,
@@ -137,6 +139,17 @@ describe('QueryOptionsBuilder', () => {
       expect(QueryOptionsBuilder.needsRestart(currentConfig, newConfig)).toBe(true);
     });
 
+    it('returns true when model route environment changes', () => {
+      const currentConfig = createMockPersistentQueryConfig({
+        environmentKey: 'ANTHROPIC_BASE_URL=https://wowcode.cc/',
+      });
+      const newConfig = {
+        ...currentConfig,
+        environmentKey: 'ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic',
+      };
+      expect(QueryOptionsBuilder.needsRestart(currentConfig, newConfig)).toBe(true);
+    });
+
     it('returns false when only effortLevel changes', () => {
       const currentConfig = createMockPersistentQueryConfig({ effortLevel: 'high' });
       const newConfig = { ...currentConfig, effortLevel: 'low' as const };
@@ -147,6 +160,17 @@ describe('QueryOptionsBuilder', () => {
       const currentConfig = createMockPersistentQueryConfig();
       const newConfig = { ...currentConfig, model: 'claude-opus-4-5' };
       expect(QueryOptionsBuilder.needsRestart(currentConfig, newConfig)).toBe(false);
+    });
+
+    it('returns true when adaptive thinking support changes', () => {
+      const currentConfig = createMockPersistentQueryConfig({ model: 'sonnet', adaptiveThinking: true });
+      const newConfig = {
+        ...currentConfig,
+        model: 'openai/gpt-5.4-mini',
+        adaptiveThinking: false,
+      };
+
+      expect(QueryOptionsBuilder.needsRestart(currentConfig, newConfig)).toBe(true);
     });
 
     it('returns true when enableChrome changes from false to true', () => {
@@ -281,6 +305,73 @@ describe('QueryOptionsBuilder', () => {
       const config = QueryOptionsBuilder.buildPersistentQueryConfig(ctx);
 
       expect(config.effortLevel).toBe('high');
+    });
+
+    it('tracks adaptive thinking support in the persistent config', () => {
+      const ctx = createMockContext({
+        settings: createMockSettings({ model: 'openrouter/fusion', effortLevel: 'high' }),
+      });
+      const config = QueryOptionsBuilder.buildPersistentQueryConfig(ctx);
+
+      expect(config.adaptiveThinking).toBe(false);
+    });
+
+    it('enables adaptive thinking in persistent config when Claude provider uses OpenRouter Claude', () => {
+      const ctx = createMockContext({
+        settings: createMockSettings({ model: 'anthropic/claude-opus-4.8', effortLevel: 'high' }),
+        customEnv: { ANTHROPIC_BASE_URL: 'https://openrouter.ai/api' },
+      });
+      const config = QueryOptionsBuilder.buildPersistentQueryConfig(ctx);
+
+      expect(config.adaptiveThinking).toBe(true);
+    });
+
+    it('tracks DeepSeek routed environment in persistent config', () => {
+      const ctx = createMockContext({
+        settings: createMockSettings({
+          model: 'deepseek-v4-pro[1m]',
+          envSnippets: [
+            {
+              id: 'claude-deepseek-v4',
+              name: 'DeepSeek V4 Pro',
+              description: 'DeepSeek route',
+              scope: 'provider:claude',
+              envVars: 'ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic\nANTHROPIC_MODEL=deepseek-v4-pro[1m]\nANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-flash\nCLAUDE_CODE_EFFORT_LEVEL=high',
+            },
+          ],
+        }),
+        customEnv: { ANTHROPIC_BASE_URL: 'https://wowcode.cc/' },
+      });
+      const config = QueryOptionsBuilder.buildPersistentQueryConfig(ctx);
+
+      expect(config.model).toBe('deepseek-v4-pro');
+      expect(config.environmentKey).toContain('ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic');
+      expect(config.environmentKey).toContain('ANTHROPIC_MODEL=deepseek-v4-pro');
+      expect(config.environmentKey).not.toContain('[1m]');
+      expect(config.environmentKey).toContain('ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-flash');
+      expect(config.environmentKey).toContain('CLAUDE_CODE_EFFORT_LEVEL=high');
+    });
+
+    it('tracks OpenRouter routed environment in persistent config', () => {
+      const ctx = createMockContext({
+        settings: createMockSettings({
+          model: 'openrouter/fusion',
+          envSnippets: [
+            {
+              id: 'claude-openrouter-official',
+              name: 'OpenRouter official route',
+              description: 'OpenRouter route',
+              scope: 'provider:claude',
+              envVars: 'ANTHROPIC_BASE_URL=https://openrouter.ai/api\nANTHROPIC_AUTH_TOKEN=openrouter-token\nANTHROPIC_API_KEY=',
+            },
+          ],
+        }),
+        customEnv: { ANTHROPIC_BASE_URL: 'https://wowcode.cc/' },
+      });
+      const config = QueryOptionsBuilder.buildPersistentQueryConfig(ctx);
+
+      expect(config.environmentKey).toContain('ANTHROPIC_BASE_URL=https://openrouter.ai/api');
+      expect(config.adaptiveThinking).toBe(false);
     });
 
     it('includes enableChrome from settings', () => {
@@ -461,6 +552,330 @@ describe('QueryOptionsBuilder', () => {
 
       expect(options.thinking).toEqual({ type: 'adaptive' });
       expect(options.effort).toBe('medium');
+      expect(options.maxThinkingTokens).toBeUndefined();
+    });
+
+    it('routes DeepSeek models to the DeepSeek snippet environment', () => {
+      const ctx = {
+        ...createMockContext({
+          settings: createMockSettings({
+            model: 'deepseek-v4-pro[1m]',
+            effortLevel: 'high',
+            envSnippets: [
+              {
+                id: 'claude-deepseek-v4',
+                name: 'DeepSeek V4 Pro',
+                description: 'DeepSeek route',
+                scope: 'provider:claude',
+                envVars: 'ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic\nANTHROPIC_AUTH_TOKEN=deepseek-token\nANTHROPIC_MODEL=deepseek-v4-pro[1m]\nANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro[1m]\nANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-flash\nCLAUDE_CODE_EFFORT_LEVEL=high',
+              },
+            ],
+          }),
+          customEnv: {
+            ANTHROPIC_BASE_URL: 'https://wowcode.cc/',
+            ANTHROPIC_AUTH_TOKEN: 'wowcode-token',
+          },
+        }),
+        abortController: new AbortController(),
+        hooks: {},
+      };
+      const options = QueryOptionsBuilder.buildPersistentQueryOptions(ctx);
+
+      expect(options.model).toBe('deepseek-v4-pro');
+      expect(options.env?.ANTHROPIC_BASE_URL).toBe('https://api.deepseek.com/anthropic');
+      expect(options.env?.ANTHROPIC_AUTH_TOKEN).toBe('deepseek-token');
+      expect(options.env?.ANTHROPIC_MODEL).toBe('deepseek-v4-pro');
+      expect(options.env?.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('deepseek-v4-pro');
+      expect(options.env?.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('deepseek-v4-flash');
+      expect(options.effort).toBe('high');
+    });
+
+    it('routes the DeepSeek vision experiment through the official DeepSeek endpoint', () => {
+      const ctx = {
+        ...createMockContext({
+          settings: createMockSettings({
+            model: 'deepseek-v4-flash-vision-exp',
+            effortLevel: 'max',
+            envSnippets: [
+              {
+                id: 'claude-deepseek-v4',
+                name: 'DeepSeek V4 Pro',
+                description: 'DeepSeek route',
+                scope: 'provider:claude',
+                envVars: 'ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic\nANTHROPIC_AUTH_TOKEN=deepseek-token\nANTHROPIC_MODEL=deepseek-v4-pro\nCLAUDE_CODE_EFFORT_LEVEL=high',
+              },
+            ],
+          }),
+          customEnv: {
+            ANTHROPIC_BASE_URL: 'https://wowcode.cc/',
+            ANTHROPIC_AUTH_TOKEN: 'wowcode-token',
+          },
+        }),
+        abortController: new AbortController(),
+        hooks: {},
+      };
+      const options = QueryOptionsBuilder.buildPersistentQueryOptions(ctx);
+
+      expect(options.model).toBe('deepseek-v4-flash-vision-exp');
+      expect(options.env?.ANTHROPIC_BASE_URL).toBe('https://api.deepseek.com/anthropic');
+      expect(options.env?.ANTHROPIC_AUTH_TOKEN).toBe('deepseek-token');
+      expect(options.env?.ANTHROPIC_MODEL).toBe('deepseek-v4-flash-vision-exp');
+      expect(options.thinking).toEqual({ type: 'adaptive' });
+      expect(options.effort).toBe('max');
+    });
+
+    it('routes non-DeepSeek Claude models back to the WoWCode snippet environment', () => {
+      const ctx = {
+        ...createMockContext({
+          settings: createMockSettings({
+            model: 'claude-opus-4-8',
+            effortLevel: 'high',
+            envSnippets: [
+              {
+                id: 'claude-wowcode-before-deepseek-v4',
+                name: 'WoWCode Claude route',
+                description: 'WoWCode route',
+                scope: 'provider:claude',
+                envVars: 'ANTHROPIC_BASE_URL=https://wowcode.cc/\nANTHROPIC_AUTH_TOKEN=wowcode-token',
+              },
+              {
+                id: 'claude-deepseek-v4',
+                name: 'DeepSeek V4 Pro',
+                description: 'DeepSeek route',
+                scope: 'provider:claude',
+                envVars: 'ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic\nANTHROPIC_AUTH_TOKEN=deepseek-token\nANTHROPIC_MODEL=deepseek-v4-pro[1m]',
+              },
+            ],
+          }),
+          customEnv: {
+            ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
+            ANTHROPIC_AUTH_TOKEN: 'deepseek-token',
+          },
+        }),
+        abortController: new AbortController(),
+        hooks: {},
+      };
+      const options = QueryOptionsBuilder.buildPersistentQueryOptions(ctx);
+
+      expect(options.env?.ANTHROPIC_BASE_URL).toBe('https://wowcode.cc/');
+      expect(options.env?.ANTHROPIC_AUTH_TOKEN).toBe('wowcode-token');
+      expect(options.env?.ANTHROPIC_MODEL).toBeUndefined();
+    });
+
+    it('routes OpenRouter group models to the OpenRouter snippet environment', () => {
+      const ctx = {
+        ...createMockContext({
+          settings: createMockSettings({
+            model: '~anthropic/claude-sonnet-latest',
+            effortLevel: 'high',
+            envSnippets: [
+              {
+                id: 'claude-wowcode-before-deepseek-v4',
+                name: 'WoWCode Claude route',
+                description: 'WoWCode route',
+                scope: 'provider:claude',
+                envVars: 'ANTHROPIC_BASE_URL=https://wowcode.cc/\nANTHROPIC_AUTH_TOKEN=wowcode-token',
+              },
+              {
+                id: 'claude-openrouter-official',
+                name: 'OpenRouter official route',
+                description: 'OpenRouter route',
+                scope: 'provider:claude',
+                envVars: 'ANTHROPIC_BASE_URL=https://openrouter.ai/api\nANTHROPIC_AUTH_TOKEN=openrouter-token\nANTHROPIC_API_KEY=',
+              },
+              {
+                id: 'claude-deepseek-v4',
+                name: 'DeepSeek V4 Pro',
+                description: 'DeepSeek route',
+                scope: 'provider:claude',
+                envVars: 'ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic\nANTHROPIC_AUTH_TOKEN=deepseek-token\nANTHROPIC_MODEL=deepseek-v4-pro[1m]',
+              },
+            ],
+          }),
+          customEnv: {
+            ANTHROPIC_BASE_URL: 'https://wowcode.cc/',
+            ANTHROPIC_AUTH_TOKEN: 'wowcode-token',
+          },
+        }),
+        abortController: new AbortController(),
+        hooks: {},
+      };
+      const options = QueryOptionsBuilder.buildPersistentQueryOptions(ctx);
+
+      expect(options.model).toBe('~anthropic/claude-sonnet-latest');
+      expect(options.env?.ANTHROPIC_BASE_URL).toBe('https://openrouter.ai/api');
+      expect(options.env?.ANTHROPIC_AUTH_TOKEN).toBe('openrouter-token');
+      expect(options.env?.ANTHROPIC_MODEL).toBeUndefined();
+      expect(options.thinking).toEqual({ type: 'adaptive' });
+      expect(options.effort).toBe('high');
+    });
+
+    it('routes direct Kimi models to the Kimi snippet environment with adaptive thinking', () => {
+      const ctx = {
+        ...createMockContext({
+          settings: createMockSettings({
+            model: 'kimi-k2.7-code',
+            effortLevel: 'max',
+            envSnippets: [
+              {
+                id: 'claude-wowcode-before-deepseek-v4',
+                name: 'WoWCode Claude route',
+                description: 'WoWCode route',
+                scope: 'provider:claude',
+                envVars: 'ANTHROPIC_BASE_URL=https://wowcode.cc/\nANTHROPIC_AUTH_TOKEN=wowcode-token',
+              },
+              {
+                id: 'claude-kimi-official',
+                name: 'Kimi official route',
+                description: 'Kimi route',
+                scope: 'provider:claude',
+                envVars: 'ANTHROPIC_BASE_URL=https://api.moonshot.cn/anthropic\nANTHROPIC_AUTH_TOKEN=kimi-token\nENABLE_TOOL_SEARCH=false',
+              },
+              {
+                id: 'claude-openrouter-official',
+                name: 'OpenRouter official route',
+                description: 'OpenRouter route',
+                scope: 'provider:claude',
+                envVars: 'ANTHROPIC_BASE_URL=https://openrouter.ai/api\nANTHROPIC_AUTH_TOKEN=openrouter-token',
+              },
+            ],
+          }),
+          customEnv: {
+            ANTHROPIC_BASE_URL: 'https://wowcode.cc/',
+            ANTHROPIC_AUTH_TOKEN: 'wowcode-token',
+          },
+        }),
+        abortController: new AbortController(),
+        hooks: {},
+      };
+      const options = QueryOptionsBuilder.buildPersistentQueryOptions(ctx);
+
+      expect(options.model).toBe('kimi-k2.7-code');
+      expect(options.env?.ANTHROPIC_BASE_URL).toBe('https://api.moonshot.cn/anthropic');
+      expect(options.env?.ANTHROPIC_AUTH_TOKEN).toBe('kimi-token');
+      expect(options.env?.ENABLE_TOOL_SEARCH).toBe('false');
+      expect(options.env?.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('kimi-k2.7-code');
+      expect(options.env?.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('kimi-k2.7-code');
+      expect(options.env?.CLAUDE_CODE_SUBAGENT_MODEL).toBe('kimi-k2.7-code');
+      expect(options.env?.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('262144');
+      expect(options.thinking).toEqual({ type: 'adaptive' });
+      expect(options.effort).toBe('max');
+    });
+
+    it('routes OpenRouter Fable 5 to the OpenRouter snippet environment', () => {
+      const ctx = {
+        ...createMockContext({
+          settings: createMockSettings({
+            model: 'anthropic/claude-fable-5',
+            effortLevel: 'high',
+            envSnippets: [
+              {
+                id: 'claude-wowcode-before-deepseek-v4',
+                name: 'WoWCode Claude route',
+                description: 'WoWCode route',
+                scope: 'provider:claude',
+                envVars: 'ANTHROPIC_BASE_URL=https://wowcode.cc/\nANTHROPIC_AUTH_TOKEN=wowcode-token',
+              },
+              {
+                id: 'claude-openrouter-official',
+                name: 'OpenRouter official route',
+                description: 'OpenRouter route',
+                scope: 'provider:claude',
+                envVars: 'ANTHROPIC_BASE_URL=https://openrouter.ai/api\nANTHROPIC_AUTH_TOKEN=openrouter-token\nANTHROPIC_API_KEY=',
+              },
+            ],
+          }),
+          customEnv: {
+            ANTHROPIC_BASE_URL: 'https://wowcode.cc/',
+            ANTHROPIC_AUTH_TOKEN: 'wowcode-token',
+          },
+        }),
+        abortController: new AbortController(),
+        hooks: {},
+      };
+      const options = QueryOptionsBuilder.buildPersistentQueryOptions(ctx);
+
+      expect(options.model).toBe('anthropic/claude-fable-5');
+      expect(options.env?.ANTHROPIC_BASE_URL).toBe('https://openrouter.ai/api');
+      expect(options.env?.ANTHROPIC_AUTH_TOKEN).toBe('openrouter-token');
+      expect(options.env?.ANTHROPIC_MODEL).toBeUndefined();
+      expect(options.thinking).toEqual({ type: 'adaptive' });
+      expect(options.effort).toBe('high');
+    });
+
+    it.each([
+      'anthropic/claude-opus-4.8',
+      'anthropic/claude-sonnet-5',
+      'anthropic/claude-haiku-4.5',
+    ])('routes OpenRouter Anthropic model %s to the OpenRouter snippet environment', (model) => {
+      const ctx = {
+        ...createMockContext({
+          settings: createMockSettings({
+            model,
+            effortLevel: 'high',
+            envSnippets: [
+              {
+                id: 'claude-wowcode-before-deepseek-v4',
+                name: 'WoWCode Claude route',
+                description: 'WoWCode route',
+                scope: 'provider:claude',
+                envVars: 'ANTHROPIC_BASE_URL=https://wowcode.cc/\nANTHROPIC_AUTH_TOKEN=wowcode-token',
+              },
+              {
+                id: 'claude-openrouter-official',
+                name: 'OpenRouter official route',
+                description: 'OpenRouter route',
+                scope: 'provider:claude',
+                envVars: 'ANTHROPIC_BASE_URL=https://openrouter.ai/api\nANTHROPIC_AUTH_TOKEN=openrouter-token\nANTHROPIC_API_KEY=',
+              },
+            ],
+          }),
+          customEnv: {
+            ANTHROPIC_BASE_URL: 'https://wowcode.cc/',
+            ANTHROPIC_AUTH_TOKEN: 'wowcode-token',
+          },
+        }),
+        abortController: new AbortController(),
+        hooks: {},
+      };
+      const options = QueryOptionsBuilder.buildPersistentQueryOptions(ctx);
+
+      expect(options.model).toBe(model);
+      expect(options.env?.ANTHROPIC_BASE_URL).toBe('https://openrouter.ai/api');
+      expect(options.env?.ANTHROPIC_AUTH_TOKEN).toBe('openrouter-token');
+      expect(options.env?.ANTHROPIC_MODEL).toBeUndefined();
+      expect(options.thinking).toEqual({ type: 'adaptive' });
+      expect(options.effort).toBe('high');
+    });
+
+    it('sets adaptive thinking for Anthropic slugs routed through OpenRouter', () => {
+      const ctx = {
+        ...createMockContext({
+          settings: createMockSettings({ model: 'anthropic/claude-opus-4.8', effortLevel: 'max' }),
+          customEnv: { ANTHROPIC_BASE_URL: 'https://openrouter.ai/api' },
+        }),
+        abortController: new AbortController(),
+        hooks: {},
+      };
+      const options = QueryOptionsBuilder.buildPersistentQueryOptions(ctx);
+
+      expect(options.thinking).toEqual({ type: 'adaptive' });
+      expect(options.effort).toBe('max');
+      expect(options.maxThinkingTokens).toBeUndefined();
+    });
+
+    it('does not set adaptive thinking for explicitly non-Claude OpenRouter slugs', () => {
+      const ctx = {
+        ...createMockContext({
+          settings: createMockSettings({ model: 'openai/gpt-5.4-mini', effortLevel: 'medium' }),
+        }),
+        abortController: new AbortController(),
+        hooks: {},
+      };
+      const options = QueryOptionsBuilder.buildPersistentQueryOptions(ctx);
+
+      expect(options.thinking).toBeUndefined();
+      expect(options.effort).toBeUndefined();
       expect(options.maxThinkingTokens).toBeUndefined();
     });
 

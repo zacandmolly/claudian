@@ -1,13 +1,31 @@
-import { CODEX_SPARK_MODEL, DEFAULT_CODEX_PRIMARY_MODEL } from '@/providers/codex/types/models';
+import {
+  CODEX_SPARK_MODEL,
+  DEFAULT_CODEX_PRIMARY_MODEL,
+  GPT_5_6_LUNA_MODEL,
+  GPT_5_6_SOL_MODEL,
+  GPT_5_6_TERRA_MODEL,
+} from '@/providers/codex/types/models';
 import { codexChatUIConfig } from '@/providers/codex/ui/CodexChatUIConfig';
 
 describe('CodexChatUIConfig', () => {
   describe('getModelOptions', () => {
     it('should return default models when no env vars', () => {
       const options = codexChatUIConfig.getModelOptions({});
-      expect(options).toHaveLength(2);
+      expect(options).toHaveLength(5);
+      expect(options.map(o => o.value)).toEqual([
+        'gpt-5.4-mini',
+        CODEX_SPARK_MODEL,
+        GPT_5_6_LUNA_MODEL,
+        GPT_5_6_TERRA_MODEL,
+        GPT_5_6_SOL_MODEL,
+      ]);
       expect(options.map(o => o.value)).toContain(DEFAULT_CODEX_PRIMARY_MODEL);
       expect(options.map(o => o.value)).toContain('gpt-5.4-mini');
+      expect(options.map(o => o.value)).toContain(CODEX_SPARK_MODEL);
+      expect(options.map(o => o.value)).toContain(GPT_5_6_SOL_MODEL);
+      expect(options.map(o => o.value)).toContain(GPT_5_6_TERRA_MODEL);
+      expect(options.map(o => o.value)).toContain(GPT_5_6_LUNA_MODEL);
+      expect(options.map(o => o.value)).not.toContain('gpt-5.5');
     });
 
     it('appends settings-defined custom models after the built-in options', () => {
@@ -26,9 +44,24 @@ describe('CodexChatUIConfig', () => {
           description: 'Fast',
         },
         {
-          value: DEFAULT_CODEX_PRIMARY_MODEL,
-          label: 'GPT-5.5',
-          description: 'Latest',
+          value: CODEX_SPARK_MODEL,
+          label: 'GPT-5.3 Codex Spark',
+          description: 'Spark',
+        },
+        {
+          value: GPT_5_6_LUNA_MODEL,
+          label: 'GPT-5.6 Luna',
+          description: 'Fast and affordable',
+        },
+        {
+          value: GPT_5_6_TERRA_MODEL,
+          label: 'GPT-5.6 Terra',
+          description: 'Balanced',
+        },
+        {
+          value: GPT_5_6_SOL_MODEL,
+          label: 'GPT-5.6 Sol',
+          description: 'Frontier',
         },
         {
           value: 'gpt-5.6-preview',
@@ -49,7 +82,7 @@ describe('CodexChatUIConfig', () => {
       });
       expect(options[0].value).toBe('my-custom-model');
       expect(options[0].description).toBe('Custom (env)');
-      expect(options.length).toBe(3);
+      expect(options.length).toBe(6);
     });
 
     it('deduplicates env and settings-defined custom models', () => {
@@ -65,7 +98,10 @@ describe('CodexChatUIConfig', () => {
       expect(options.map(option => option.value)).toEqual([
         'my-custom-model',
         'gpt-5.4-mini',
-        DEFAULT_CODEX_PRIMARY_MODEL,
+        CODEX_SPARK_MODEL,
+        GPT_5_6_LUNA_MODEL,
+        GPT_5_6_TERRA_MODEL,
+        GPT_5_6_SOL_MODEL,
         'second-custom-model',
       ]);
     });
@@ -74,7 +110,35 @@ describe('CodexChatUIConfig', () => {
       const options = codexChatUIConfig.getModelOptions({
         environmentVariables: `OPENAI_MODEL=${DEFAULT_CODEX_PRIMARY_MODEL}`,
       });
-      expect(options.length).toBe(2);
+      expect(options.length).toBe(5);
+    });
+
+    it('normalizes OpenAI-prefixed GPT aliases to local Codex model ids', () => {
+      const options = codexChatUIConfig.getModelOptions({
+        environmentVariables: 'OPENAI_MODEL=openai/gpt-5.5',
+        providerConfigs: {
+          codex: {
+            customModels: 'openai/gpt-5.4-mini',
+          },
+        },
+      });
+
+      expect(options.map(option => option.value)).toEqual([
+        'gpt-5.5',
+        'gpt-5.4-mini',
+        CODEX_SPARK_MODEL,
+        GPT_5_6_LUNA_MODEL,
+        GPT_5_6_TERRA_MODEL,
+        GPT_5_6_SOL_MODEL,
+      ]);
+    });
+  });
+
+  describe('ownsModel', () => {
+    it('owns legacy OpenAI-prefixed GPT aliases through Codex OAuth routing', () => {
+      expect(codexChatUIConfig.ownsModel('openai/gpt-5.5', {})).toBe(true);
+      expect(codexChatUIConfig.ownsModel('openai/gpt-5.4-mini', {})).toBe(true);
+      expect(codexChatUIConfig.ownsModel('openai/gpt-5.3-codex-spark', {})).toBe(true);
     });
   });
 
@@ -86,22 +150,57 @@ describe('CodexChatUIConfig', () => {
   });
 
   describe('getReasoningOptions', () => {
-    it('should return effort levels', () => {
+    it('returns the full GPT-5.6 effort range for the default Terra model', () => {
       const options = codexChatUIConfig.getReasoningOptions(DEFAULT_CODEX_PRIMARY_MODEL, {});
-      expect(options).toHaveLength(4);
-      expect(options.map(o => o.value)).toEqual(['low', 'medium', 'high', 'xhigh']);
+      expect(options).toHaveLength(6);
+      expect(options.map(o => o.value)).toEqual(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+    });
+
+    it('supports max and ultra for GPT-5.6 Sol and Terra', () => {
+      for (const model of [GPT_5_6_SOL_MODEL, GPT_5_6_TERRA_MODEL]) {
+        expect(codexChatUIConfig.getReasoningOptions(model, {}).map(option => option.value)).toEqual([
+          'low',
+          'medium',
+          'high',
+          'xhigh',
+          'max',
+          'ultra',
+        ]);
+      }
+    });
+
+    it('supports max but not ultra for GPT-5.6 Luna', () => {
+      expect(codexChatUIConfig.getReasoningOptions(GPT_5_6_LUNA_MODEL, {}).map(option => option.value)).toEqual([
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+      ]);
     });
   });
 
   describe('getDefaultReasoningValue', () => {
-    it('should return medium for all models', () => {
+    it('keeps medium for legacy, Terra, and Luna models', () => {
       expect(codexChatUIConfig.getDefaultReasoningValue(DEFAULT_CODEX_PRIMARY_MODEL, {})).toBe('medium');
+      expect(codexChatUIConfig.getDefaultReasoningValue(GPT_5_6_TERRA_MODEL, {})).toBe('medium');
+      expect(codexChatUIConfig.getDefaultReasoningValue(GPT_5_6_LUNA_MODEL, {})).toBe('medium');
+    });
+
+    it('uses the catalog default of low for GPT-5.6 Sol', () => {
+      expect(codexChatUIConfig.getDefaultReasoningValue(GPT_5_6_SOL_MODEL, {})).toBe('low');
     });
   });
 
   describe('getContextWindowSize', () => {
-    it('should return 200000 for all models', () => {
-      expect(codexChatUIConfig.getContextWindowSize(DEFAULT_CODEX_PRIMARY_MODEL)).toBe(200_000);
+    it('returns 372000 for the default Terra model', () => {
+      expect(codexChatUIConfig.getContextWindowSize(DEFAULT_CODEX_PRIMARY_MODEL)).toBe(372_000);
+    });
+
+    it('returns 372000 for all GPT-5.6 models', () => {
+      for (const model of [GPT_5_6_SOL_MODEL, GPT_5_6_TERRA_MODEL, GPT_5_6_LUNA_MODEL]) {
+        expect(codexChatUIConfig.getContextWindowSize(model)).toBe(372_000);
+      }
     });
   });
 
@@ -151,6 +250,7 @@ describe('CodexChatUIConfig', () => {
     it('should return true for built-in models', () => {
       expect(codexChatUIConfig.isDefaultModel(DEFAULT_CODEX_PRIMARY_MODEL)).toBe(true);
       expect(codexChatUIConfig.isDefaultModel('gpt-5.4-mini')).toBe(true);
+      expect(codexChatUIConfig.isDefaultModel(CODEX_SPARK_MODEL)).toBe(true);
     });
 
     it('should return false for custom models', () => {
@@ -176,6 +276,12 @@ describe('CodexChatUIConfig', () => {
         },
       })).toBe('settings-custom');
     });
+
+    it('normalizes legacy OpenAI-prefixed GPT aliases to Codex model ids', () => {
+      expect(codexChatUIConfig.normalizeModelVariant('openai/gpt-5.5', {})).toBe(DEFAULT_CODEX_PRIMARY_MODEL);
+      expect(codexChatUIConfig.normalizeModelVariant('openai/gpt-5.4-mini', {})).toBe('gpt-5.4-mini');
+      expect(codexChatUIConfig.normalizeModelVariant('openai/gpt-5.3-codex-spark', {})).toBe(CODEX_SPARK_MODEL);
+    });
   });
 
   describe('getCustomModelIds', () => {
@@ -186,6 +292,16 @@ describe('CodexChatUIConfig', () => {
 
     it('should not include default models', () => {
       const ids = codexChatUIConfig.getCustomModelIds({ OPENAI_MODEL: DEFAULT_CODEX_PRIMARY_MODEL });
+      expect(ids.size).toBe(0);
+    });
+
+    it('treats removed GPT-5.5 aliases as legacy custom models', () => {
+      const ids = codexChatUIConfig.getCustomModelIds({ OPENAI_MODEL: 'openai/gpt-5.5' });
+      expect(ids).toEqual(new Set(['gpt-5.5']));
+    });
+
+    it('does not treat OpenAI-prefixed Spark alias as a custom Codex model', () => {
+      const ids = codexChatUIConfig.getCustomModelIds({ OPENAI_MODEL: 'openai/gpt-5.3-codex-spark' });
       expect(ids.size).toBe(0);
     });
 
@@ -206,6 +322,23 @@ describe('CodexChatUIConfig', () => {
         planValue: 'plan',
         planLabel: 'Plan',
       });
+    });
+  });
+
+  describe('getServiceTierToggle', () => {
+    it('supports Fast tier for every GPT-5.6 primary model', () => {
+      for (const model of [
+        DEFAULT_CODEX_PRIMARY_MODEL,
+        GPT_5_6_SOL_MODEL,
+        GPT_5_6_TERRA_MODEL,
+        GPT_5_6_LUNA_MODEL,
+      ]) {
+        expect(codexChatUIConfig.getServiceTierToggle!({ model })).not.toBeNull();
+      }
+    });
+
+    it('does not expose Fast tier for models without catalog support', () => {
+      expect(codexChatUIConfig.getServiceTierToggle!({ model: 'gpt-5.4-mini' })).toBeNull();
     });
   });
 });

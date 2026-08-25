@@ -113,6 +113,11 @@ describe('getModelsFromEnvironment', () => {
     expect(result[0].label).toBe('Sonnet 4.6');
   });
 
+  it('formats OpenRouter dot-version Claude model ids into friendly labels', () => {
+    const result = getModelsFromEnvironment({ ANTHROPIC_MODEL: 'anthropic/claude-opus-4.8' });
+    expect(result[0].label).toBe('Opus 4.8');
+  });
+
   it('formats dated Claude model ids with shortened date tags', () => {
     const result = getModelsFromEnvironment({ ANTHROPIC_MODEL: 'claude-opus-4-5-20251101' });
     expect(result[0].label).toBe('Opus 4.5 (2511)');

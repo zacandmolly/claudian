@@ -6,7 +6,13 @@ import * as path from 'path';
 
 import type { PreparedChatTurn } from '@/core/runtime/types';
 import type { StreamChunk } from '@/core/types/chat';
-import { CODEX_SPARK_MODEL, DEFAULT_CODEX_PRIMARY_MODEL } from '@/providers/codex/types/models';
+import {
+  CODEX_SPARK_MODEL,
+  DEFAULT_CODEX_MINI_MODEL,
+  DEFAULT_CODEX_PRIMARY_MODEL,
+  GPT_5_6_SOL_MODEL,
+  GPT_5_6_TERRA_MODEL,
+} from '@/providers/codex/types/models';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -1357,6 +1363,45 @@ describe('CodexChatRuntime', () => {
       rt.cleanup();
     });
 
+    it('normalizes legacy OpenAI-prefixed GPT aliases before sending to Codex app-server', async () => {
+      const plugin = createMockPlugin({ model: 'openai/gpt-5.5' });
+      const rt = new CodexChatRuntime(plugin);
+
+      setupDefaultRequestMock('thread-alias');
+      captureHandlers();
+
+      await collectChunks(rt.query(createTurn()));
+
+      const threadStartCall = findCall('thread/start');
+      const turnStartCall = findCall('turn/start');
+      expect(threadStartCall[1].model).toBe(DEFAULT_CODEX_PRIMARY_MODEL);
+      expect(turnStartCall[1].model).toBe(DEFAULT_CODEX_PRIMARY_MODEL);
+
+      rt.cleanup();
+    });
+
+    it('normalizes legacy OpenAI-prefixed mini aliases before resuming Codex threads', async () => {
+      const plugin = createMockPlugin({ model: 'openai/gpt-5.4-mini' });
+      const rt = new CodexChatRuntime(plugin);
+
+      rt.syncConversationState({
+        sessionId: 'thread-resume-alias',
+        providerState: { threadId: 'thread-resume-alias' },
+      });
+
+      setupDefaultRequestMock('thread-resume-alias');
+      captureHandlers();
+
+      await collectChunks(rt.query(createTurn()));
+
+      const resumeCall = findCall('thread/resume');
+      const turnStartCall = findCall('turn/start');
+      expect(resumeCall[1].model).toBe(DEFAULT_CODEX_MINI_MODEL);
+      expect(turnStartCall[1].model).toBe(DEFAULT_CODEX_MINI_MODEL);
+
+      rt.cleanup();
+    });
+
     it('sends serviceTier on thread/resume when fast mode is enabled', async () => {
       const plugin = createMockPlugin({ model: DEFAULT_CODEX_PRIMARY_MODEL, serviceTier: 'fast' });
       const rt = new CodexChatRuntime(plugin);
@@ -1416,6 +1461,20 @@ describe('CodexChatRuntime', () => {
 
     it('sends serviceTier fast on thread/start and turn/start when fast mode is enabled', async () => {
       const plugin = createMockPlugin({ serviceTier: 'fast' });
+      const rt = new CodexChatRuntime(plugin);
+
+      await collectChunks(rt.query(createTurn()));
+
+      const threadStartCall = findCall('thread/start');
+      const turnStartCall = findCall('turn/start');
+      expect(threadStartCall[1].serviceTier).toBe('fast');
+      expect(turnStartCall[1].serviceTier).toBe('fast');
+
+      rt.cleanup();
+    });
+
+    it('sends serviceTier fast for GPT-5.6 models', async () => {
+      const plugin = createMockPlugin({ model: GPT_5_6_SOL_MODEL, serviceTier: 'fast' });
       const rt = new CodexChatRuntime(plugin);
 
       await collectChunks(rt.query(createTurn()));
@@ -1759,6 +1818,27 @@ describe('CodexChatRuntime', () => {
   });
 
   describe('query - plan mode (collaborationMode)', () => {
+    it.each([
+      [GPT_5_6_SOL_MODEL, 'max'],
+      [GPT_5_6_TERRA_MODEL, 'ultra'],
+    ])('passes %s reasoning effort %s through to turn/start', async (model, effortLevel) => {
+      const plugin = createMockPlugin({ model, effortLevel });
+      const rt = new CodexChatRuntime(plugin);
+      captureHandlers();
+      setupDefaultRequestMock();
+
+      await collectChunks(rt.query(createTurn('hard task')));
+
+      const turnStartCall = findCall('turn/start');
+      expect(turnStartCall[1].effort).toBe(effortLevel);
+      expect(turnStartCall[1].collaborationMode.settings).toMatchObject({
+        model,
+        reasoning_effort: effortLevel,
+      });
+
+      rt.cleanup();
+    });
+
     it('includes collaborationMode in turn/start when permissionMode is plan', async () => {
       const plugin = createMockPlugin({ permissionMode: 'plan' });
       const rt = new CodexChatRuntime(plugin);

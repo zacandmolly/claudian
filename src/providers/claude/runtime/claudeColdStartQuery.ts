@@ -7,12 +7,15 @@ import { getEnhancedPath, getMissingNodeError, parseEnvironmentVariables } from 
 import { getVaultPath } from '../../../utils/path';
 import { extractAssistantText } from '../auxiliary/extractAssistantText';
 import {
+  normalizeClaudeRuntimeModelId,
+  resolveClaudeEnvironmentForModel,
+} from '../env/modelEnvironment';
+import {
   getClaudeProviderSettings,
   resolveClaudeSettingSources,
 } from '../settings';
-import {
-  resolveEffortLevel,
-} from '../types/models';
+import { resolveEffortLevel } from '../types/models';
+import { shouldUseClaudeAdaptiveThinking } from './adaptiveThinking';
 import { createCustomSpawnFunction } from './customSpawn';
 
 export interface ColdStartQueryConfig {
@@ -76,16 +79,18 @@ export async function runColdStartQuery(
   const claudeSettings = getClaudeProviderSettings(settings);
 
   const selectedModel = config.model ?? (settings.model as string);
+  const runtimeModel = normalizeClaudeRuntimeModelId(selectedModel);
+  const modelEnv = resolveClaudeEnvironmentForModel(settings, customEnv, selectedModel);
 
   const options: Options = {
     cwd: vaultPath,
     systemPrompt: config.systemPrompt,
-    model: selectedModel,
+    model: runtimeModel,
     abortController: config.abortController,
     pathToClaudeCodeExecutable: resolvedClaudePath,
     env: {
       ...process.env,
-      ...customEnv,
+      ...modelEnv,
       PATH: enhancedPath,
     },
     permissionMode: 'bypassPermissions',
@@ -114,8 +119,8 @@ export async function runColdStartQuery(
     options.extraArgs = { ...options.extraArgs, 'enable-auto-mode': null };
   }
 
-  if (!config.thinking?.disabled) {
-    const effortLevel = resolveEffortLevel(selectedModel, settings.effortLevel);
+  if (!config.thinking?.disabled && shouldUseClaudeAdaptiveThinking(runtimeModel, modelEnv)) {
+    const effortLevel = resolveEffortLevel(runtimeModel, settings.effortLevel);
     options.thinking = { type: 'adaptive' };
     // SDK runtime accepts `xhigh` on Opus 4.7+ and silently falls back to
     // `high` elsewhere, but its type definition lags our local EffortLevel.

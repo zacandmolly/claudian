@@ -57,7 +57,7 @@ describe('probeRuntimeCommands', () => {
     expect(sdkMock.getLastOptions()?.settingSources).toEqual(['project', 'local']);
   });
 
-  it('includes user settings in the probe when the runtime would include them', async () => {
+  it('includes user settings but does not launch Chrome during the probe', async () => {
     sdkMock.setMockMessages([
       { type: 'system', subtype: 'init', session_id: 'probe-session' },
     ], { appendResult: false });
@@ -70,7 +70,7 @@ describe('probeRuntimeCommands', () => {
 
     const options = sdkMock.getLastOptions();
     expect(options?.settingSources).toEqual(['user', 'project', 'local']);
-    expect(options?.extraArgs).toEqual({ chrome: null });
+    expect(options?.extraArgs).toBeUndefined();
   });
 
   it('passes auto mode opt-in when Claude safe mode is auto', async () => {

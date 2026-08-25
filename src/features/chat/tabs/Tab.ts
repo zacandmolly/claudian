@@ -4,7 +4,7 @@ import { Notice, Platform } from 'obsidian';
 import { getHiddenProviderCommandSet } from '../../../core/providers/commands/hiddenCommands';
 import type { ProviderCommandDropdownConfig } from '../../../core/providers/commands/ProviderCommandCatalog';
 import type { ProviderCommandEntry } from '../../../core/providers/commands/ProviderCommandEntry';
-import { getEnabledProviderForModel, getProviderForModel } from '../../../core/providers/modelRouting';
+import { getEnabledProviderForModel } from '../../../core/providers/modelRouting';
 import { ProviderRegistry } from '../../../core/providers/ProviderRegistry';
 import { ProviderSettingsCoordinator } from '../../../core/providers/ProviderSettingsCoordinator';
 import { ProviderWorkspaceRegistry } from '../../../core/providers/ProviderWorkspaceRegistry';
@@ -24,6 +24,7 @@ import type { ChatMessage, ClaudianSettings, Conversation, StreamChunk } from '.
 import { t } from '../../../i18n/i18n';
 import type ClaudianPlugin from '../../../main';
 import { SlashCommandDropdown } from '../../../shared/components/SlashCommandDropdown';
+import { resolveProviderGroupForModelId, resolveProviderIconForModelId } from '../../../shared/icons';
 import { getEnhancedPath } from '../../../utils/env';
 import { getVaultPath } from '../../../utils/path';
 import { BrowserSelectionController } from '../controllers/BrowserSelectionController';
@@ -69,14 +70,52 @@ type TabProviderSettings = Record<string, unknown> & {
 export function getBlankTabModelOptions(
   settings: Record<string, unknown>,
 ): ProviderUIOption[] {
-  return ProviderRegistry.getEnabledProviderIds(settings).flatMap((providerId) => {
+  const seenVisualKeys = new Set<string>();
+  const options: ProviderUIOption[] = [];
+
+  for (const providerId of ProviderRegistry.getEnabledProviderIds(settings)) {
     const uiConfig = ProviderRegistry.getChatUIConfig(providerId);
     const providerIcon = uiConfig.getProviderIcon?.() ?? undefined;
     const group = ProviderRegistry.getProviderDisplayName(providerId);
 
-    return uiConfig.getModelOptions(settings)
-      .map(model => ({ ...model, group, providerIcon }));
-  });
+    const providerOptions = uiConfig.getModelOptions(settings)
+      .map((model) => {
+        const modelGroup = providerId === 'claude' || providerId === 'codex'
+          ? resolveProviderGroupForModelId(model.value)
+          : undefined;
+        const modelProviderIcon = providerId === 'claude' || providerId === 'codex'
+          ? resolveProviderIconForModelId(model.value)
+          : undefined;
+        const resolvedProviderIcon = model.providerIcon ?? modelProviderIcon ?? providerIcon;
+        return {
+          ...model,
+          group: model.group ?? modelGroup ?? group,
+          ...(resolvedProviderIcon ? { providerIcon: resolvedProviderIcon } : {}),
+        };
+      });
+
+    for (const option of providerOptions) {
+      const visualKey = getBlankTabModelVisualKey(option);
+      if (seenVisualKeys.has(visualKey)) {
+        continue;
+      }
+
+      seenVisualKeys.add(visualKey);
+      options.push(option);
+    }
+  }
+
+  return options;
+}
+
+function getBlankTabModelVisualKey(option: ProviderUIOption): string {
+  if (option.group !== 'GPT') {
+    return `${option.group ?? ''}:${option.value}`;
+  }
+
+  const normalized = option.value.trim().toLowerCase();
+  const slug = normalized.replace(/\[1m\]$/, '').split('/').pop() ?? normalized;
+  return `GPT:${slug}`;
 }
 
 /**
@@ -867,7 +906,7 @@ function initializeInputToolbar(
 
       // For bound tabs, reject cross-provider model changes
       const boundProvider = tab.providerId;
-      const modelProvider = getProviderForModel(model, plugin.settings);
+      const modelProvider = getEnabledProviderForModel(model, plugin.settings, boundProvider);
       if (modelProvider !== boundProvider) {
         new Notice('Cannot switch provider on a bound session. Start a new tab instead.');
         tab.ui.modelSelector?.updateDisplay();

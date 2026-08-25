@@ -16,7 +16,12 @@ import type {
   ManagedMcpServer,
   UsageInfo,
 } from '../../../core/types';
-import { appendCheckIcon, appendMcpIcon, createProviderIconSvg } from '../../../shared/icons';
+import {
+  appendCheckIcon,
+  appendMcpIcon,
+  createProviderIconSvg,
+  resolveProviderIconForModelId,
+} from '../../../shared/icons';
 import { filterValidPaths, findConflictingPath, isDuplicatePath, isValidDirectoryPath, validateDirectoryPath } from '../../../utils/externalContext';
 import { expandHomePath, normalizePathForFilesystem } from '../../../utils/path';
 
@@ -124,7 +129,9 @@ export class ModelSelector {
         option.addClass('selected');
       }
 
-      const icon = model.providerIcon ?? this.callbacks.getUIConfig().getProviderIcon?.();
+      const icon = model.providerIcon
+        ?? resolveProviderIconForModelId(model.value)
+        ?? this.callbacks.getUIConfig().getProviderIcon?.();
       if (icon) {
         option.appendChild(createProviderIconSvg(icon, {
           className: 'claudian-model-provider-icon',
