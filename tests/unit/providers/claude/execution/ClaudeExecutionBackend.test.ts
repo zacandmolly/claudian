@@ -265,6 +265,99 @@ describe('ClaudeExecutionBackend', () => {
     ]);
   });
 
+  it('routes DeepSeek through its scoped environment without leaking route secrets', async () => {
+    sdkMock.setMockMessages([
+      { type: 'system', subtype: 'init', session_id: 'deepseek-session' },
+      { type: 'result', subtype: 'success' },
+    ], { appendResult: false });
+    const { services } = createServices();
+    const host = createHost();
+    host.settings.envSnippets = [{
+      id: 'claude-deepseek-v4',
+      name: 'DeepSeek route',
+      description: '',
+      scope: 'provider:claude',
+      envVars: [
+        'ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic',
+        'ANTHROPIC_AUTH_TOKEN=test-route-secret',
+        'ANTHROPIC_MODEL=deepseek-v4-pro[1m]',
+      ].join('\n'),
+    }];
+    const session = new ClaudeExecutionBackend(host, services)
+      .createSession(createConfig());
+
+    await collectEvents(session.execute(createRequest({
+      configuration: {
+        systemInstructions: { kind: 'provider-default' },
+        model: 'claude-code/deepseek-v4-flash[1m]',
+        reasoning: 'low',
+      },
+    })).events);
+
+    const options = sdkMock.getLastOptions();
+    expect(options?.model).toBe('deepseek-v4-flash');
+    expect(options?.env).toEqual(expect.objectContaining({
+      ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
+      ANTHROPIC_AUTH_TOKEN: 'test-route-secret',
+      ANTHROPIC_MODEL: 'deepseek-v4-flash',
+    }));
+    expect(options?.thinking).toEqual({ type: 'adaptive' });
+    expect(options?.effort).toBe('high');
+    const fingerprint = session.getSnapshot().providerState?.environmentFingerprint;
+    expect(fingerprint).toMatch(/^runtime-input:v1:[0-9a-f]{64}$/);
+    expect(fingerprint).not.toContain('test-route-secret');
+  });
+
+  it('fences a legacy gateway resume and replays history on the new route', async () => {
+    sdkMock.setMockMessages([
+      { type: 'system', subtype: 'init', session_id: 'openrouter-session' },
+      { type: 'result', subtype: 'success' },
+    ], { appendResult: false });
+    const { services } = createServices();
+    const host = createHost();
+    host.settings.envSnippets = [{
+      id: 'claude-openrouter-official',
+      name: 'OpenRouter route',
+      description: '',
+      scope: 'provider:claude',
+      envVars: 'ANTHROPIC_BASE_URL=https://openrouter.ai/api',
+    }];
+    const session = new ClaudeExecutionBackend(host, services)
+      .createSession(createConfig({
+        resumeSeed: {
+          providerSessionId: 'legacy-pool-session',
+          providerState: { providerSessionId: 'legacy-pool-session' },
+        },
+      }));
+    const conversationHistory = [
+      { id: 'history-user', role: 'user' as const, content: 'prior question', timestamp: 1 },
+      { id: 'history-assistant', role: 'assistant' as const, content: 'prior answer', timestamp: 2 },
+    ];
+
+    await collectEvents(session.execute(createRequest({
+      conversationHistory,
+      configuration: {
+        systemInstructions: { kind: 'provider-default' },
+        model: 'claude-code/openrouter/fusion',
+        reasoning: 'max',
+      },
+    })).events);
+
+    const options = sdkMock.getLastOptions();
+    expect(options?.resume).toBeUndefined();
+    expect(options?.thinking).toBeUndefined();
+    expect(options?.effort).toBeUndefined();
+    expect(getEncodedPrompts().at(-1)).toContain('prior question');
+    expect(session.getSnapshot()).toEqual(expect.objectContaining({
+      providerSessionId: 'openrouter-session',
+      providerState: expect.objectContaining({
+        environmentFingerprint: expect.stringMatching(/^runtime-input:v1:[0-9a-f]{64}$/),
+        previousProviderSessionIds: ['legacy-pool-session'],
+        providerSessionId: 'openrouter-session',
+      }),
+    }));
+  });
+
   it('resumes and materializes a pending fork without losing opaque provider state', async () => {
     sdkMock.setMockMessages([
       { type: 'system', subtype: 'init', session_id: 'forked-session' },
@@ -1506,17 +1599,19 @@ describe('ClaudeExecutionBackend', () => {
     });
     expect(invalidatedSnapshot.providerStateDeletes).toEqual([
       'providerSessionId',
+      'environmentFingerprint',
     ]);
     expect(failedEvents).toContainEqual(expect.objectContaining({
       type: 'session_state_changed',
       snapshot: expect.objectContaining({
         status: 'invalidated',
-        providerStateDeletes: ['providerSessionId'],
+        providerStateDeletes: ['providerSessionId', 'environmentFingerprint'],
       }),
     }));
     const repeatedSnapshot = session.getSnapshot();
     expect(repeatedSnapshot.providerStateDeletes).toEqual([
       'providerSessionId',
+      'environmentFingerprint',
     ]);
     expect(repeatedSnapshot.providerStateDeletes).not.toBe(
       invalidatedSnapshot.providerStateDeletes,
@@ -1529,11 +1624,12 @@ describe('ClaudeExecutionBackend', () => {
     expect(recoveredSnapshot).toEqual(expect.objectContaining({
       status: 'idle',
       providerSessionId: 'current-session',
-      providerState: {
+      providerState: expect.objectContaining({
+        environmentFingerprint: expect.stringMatching(/^runtime-input:v1:[0-9a-f]{64}$/),
         unknownFutureField: { keep: true },
         previousProviderSessionIds: ['stale-session'],
         providerSessionId: 'current-session',
-      },
+      }),
     }));
     expect(recoveredSnapshot.providerStateDeletes).toBeUndefined();
   });

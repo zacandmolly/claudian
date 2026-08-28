@@ -240,6 +240,14 @@ describe('claudeChatUIConfig', () => {
       ]);
       expect(options.some(option => option.tokens !== undefined)).toBe(false);
     });
+
+    it('exposes only high and max effort for DeepSeek routes', () => {
+      const options = claudeChatUIConfig.getReasoningOptions('deepseek-v4-flash', {});
+
+      expect(options.map(option => option.value)).toEqual(['high', 'max']);
+      expect(claudeChatUIConfig.isAdaptiveReasoningModel('deepseek-v4-flash', {})).toBe(true);
+      expect(claudeChatUIConfig.isAdaptiveReasoningModel('openrouter/fusion', {})).toBe(false);
+    });
   });
 
   describe('applyModelDefaults', () => {

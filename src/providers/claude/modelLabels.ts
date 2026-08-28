@@ -56,7 +56,7 @@ function formatClaudeCustomModelLabel(labelSource: string): string | null {
   const candidate = claudePrefixIndex >= 0 ? without1M.slice(claudePrefixIndex) : without1M;
 
   const versionedMatch = candidate.match(new RegExp(
-    `^claude-(${CLAUDE_MODEL_TIER_PATTERN})-(\\d+)-(\\d+)`
+    `^claude-(${CLAUDE_MODEL_TIER_PATTERN})-(\\d+)[-.](\\d+)`
     + '(?:-(\\d{8}))?(?:-v\\d+:\\d+)?$',
     'i',
   ));

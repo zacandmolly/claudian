@@ -31,12 +31,16 @@ import { appendEditorContext } from '../../../utils/editor';
 import {
   getEnhancedPath,
   getMissingNodeError,
-  parseEnvironmentVariables,
 } from '../../../utils/env';
 import {
   buildContextFromHistory,
   buildPromptWithHistoryContext,
 } from '../../../utils/session';
+import {
+  normalizeClaudeRuntimeModelId,
+  resolveClaudeModelEnvironment,
+  usesModelScopedClaudeEnvironment,
+} from '../env/modelEnvironment';
 import { toClaudeRuntimeModelId } from '../modelSelection';
 import { createCustomSpawnFunction } from '../runtime/customSpawn';
 import {
@@ -50,6 +54,7 @@ import {
 import {
   type EffortLevel,
   resolveEffortLevel,
+  supportsClaudeAdaptiveThinking,
 } from '../types/models';
 
 const EFFORT_LEVELS = new Set<EffortLevel>([
@@ -73,6 +78,7 @@ export interface ClaudeNativeResume {
   readonly sessionId?: string;
   readonly resumeAt?: string;
   readonly fork?: boolean;
+  readonly environmentFingerprint?: string;
 }
 
 export interface ClaudeEncodedExecutionRequest {
@@ -80,9 +86,11 @@ export interface ClaudeEncodedExecutionRequest {
   readonly images: ImageAttachment[];
   readonly options: Options;
   readonly model: string;
-  readonly effort: EffortLevel;
+  readonly effort?: EffortLevel;
   readonly sdkPermissionMode: SDKPermissionMode;
   readonly restartKey: string;
+  readonly environmentFingerprint: string;
+  readonly nativeResumeInvalidated: boolean;
   readonly allowedTools: ReadonlySet<string> | null;
 }
 
@@ -107,29 +115,45 @@ export class ClaudeExecutionRequestEncoder {
       throw new Error('Claude CLI not found');
     }
 
-    const customEnv = parseEnvironmentVariables(
+    const settings = this.resolveSettings(request);
+    const selectedModel = toClaudeRuntimeModelId(settings.model);
+    const environmentResolution = resolveClaudeModelEnvironment(
+      settings,
       this.deps.host.getActiveEnvironmentVariables('claude'),
+      selectedModel,
     );
+    const customEnv = environmentResolution.environment;
     const enhancedPath = getEnhancedPath(customEnv.PATH, cliPath);
     const missingNodeError = getMissingNodeError(cliPath, enhancedPath);
     if (missingNodeError) {
       throw new Error(missingNodeError);
     }
 
-    const settings = this.resolveSettings(request);
     const claudeSettings = getClaudeProviderSettings(settings);
-    const model = toClaudeRuntimeModelId(settings.model);
-    const effort = resolveEffortLevel(
-      model,
-      isEffortLevel(request.configuration.reasoning)
-        ? request.configuration.reasoning
-        : settings.effortLevel,
-    );
+    const model = normalizeClaudeRuntimeModelId(selectedModel);
+    const adaptiveThinking = supportsClaudeAdaptiveThinking(model);
+    const effort = adaptiveThinking
+      ? resolveEffortLevel(
+        model,
+        isEffortLevel(request.configuration.reasoning)
+          ? request.configuration.reasoning
+          : settings.effortLevel,
+      )
+      : undefined;
+    const nativeResumeInvalidated = Boolean(resume.sessionId && (
+      resume.environmentFingerprint
+        ? resume.environmentFingerprint !== environmentResolution.fingerprint
+        : usesModelScopedClaudeEnvironment(selectedModel)
+    ));
+    const effectiveResume = nativeResumeInvalidated ? {} : resume;
     const sdkPermissionMode = this.resolveSdkPermissionMode(
       settings.permissionMode,
       claudeSettings.safeMode,
     );
-    const prompt = this.encodePrompt(request, replayConversationHistory);
+    const prompt = this.encodePrompt(
+      request,
+      replayConversationHistory || nativeResumeInvalidated,
+    );
     const policy = resolveToolPolicy(request);
     const systemPrompt = request.configuration.systemInstructions.kind === 'explicit'
       ? [
@@ -154,8 +178,7 @@ export class ClaudeExecutionRequestEncoder {
       cwd: sessionConfig.vaultWorkingDirectory,
       systemPrompt,
       model,
-      effort,
-      thinking: { type: 'adaptive' },
+      ...(effort ? { effort, thinking: { type: 'adaptive' as const } } : {}),
       abortController,
       pathToClaudeCodeExecutable: cliPath,
       env: {
@@ -181,9 +204,9 @@ export class ClaudeExecutionRequestEncoder {
         : {}),
       ...(policy.tools !== undefined ? { tools: policy.tools } : {}),
       ...(policy.hooks ? { hooks: policy.hooks } : {}),
-      ...(resume.sessionId ? { resume: resume.sessionId } : {}),
-      ...(resume.resumeAt ? { resumeSessionAt: resume.resumeAt } : {}),
-      ...(resume.fork ? { forkSession: true } : {}),
+      ...(effectiveResume.sessionId ? { resume: effectiveResume.sessionId } : {}),
+      ...(effectiveResume.resumeAt ? { resumeSessionAt: effectiveResume.resumeAt } : {}),
+      ...(effectiveResume.fork ? { forkSession: true } : {}),
     };
 
     if (claudeSettings.safeMode === 'auto') {
@@ -228,7 +251,11 @@ export class ClaudeExecutionRequestEncoder {
         enableChrome: claudeSettings.enableChrome,
         enableAutoMode: claudeSettings.safeMode === 'auto',
         persistSession: options.persistSession,
+        environmentFingerprint: environmentResolution.fingerprint,
+        adaptiveThinking,
       }),
+      environmentFingerprint: environmentResolution.fingerprint,
+      nativeResumeInvalidated,
       allowedTools: policy.allowedTools,
     };
   }

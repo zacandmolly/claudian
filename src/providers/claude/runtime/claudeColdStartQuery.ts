@@ -7,9 +7,13 @@ import type {
 
 import type { ProviderHost } from '../../../core/providers/ProviderHost';
 import { ProviderSettingsCoordinator } from '../../../core/providers/ProviderSettingsCoordinator';
-import { getEnhancedPath, getMissingNodeError, parseEnvironmentVariables } from '../../../utils/env';
+import { getEnhancedPath, getMissingNodeError } from '../../../utils/env';
 import { getVaultPath } from '../../../utils/path';
 import { extractAssistantText } from '../auxiliary/extractAssistantText';
+import {
+  normalizeClaudeRuntimeModelId,
+  resolveClaudeModelEnvironment,
+} from '../env/modelEnvironment';
 import { loadClaudeAgentQuery } from '../loadClaudeAgentSdk';
 import { toClaudeRuntimeModelId } from '../modelSelection';
 import {
@@ -18,6 +22,7 @@ import {
 } from '../settings';
 import {
   resolveEffortLevel,
+  supportsClaudeAdaptiveThinking,
 } from '../types/models';
 import { createCustomSpawnFunction } from './customSpawn';
 
@@ -87,9 +92,20 @@ export async function runColdStartQuery(
     throw new Error('Claude CLI not found');
   }
 
-  const customEnv = parseEnvironmentVariables(
-    config.plugin.getActiveEnvironmentVariables('claude')
+  const settings = config.providerSettings
+    ?? ProviderSettingsCoordinator.getProviderSettingsSnapshot(
+      config.plugin.settings,
+      'claude',
+    );
+  const selectedModel = toClaudeRuntimeModelId(
+    config.model ?? (settings.model as string),
   );
+  const modelEnvironment = resolveClaudeModelEnvironment(
+    settings,
+    config.plugin.getActiveEnvironmentVariables('claude'),
+    selectedModel,
+  );
+  const customEnv = modelEnvironment.environment;
   const enhancedPath = getEnhancedPath(customEnv.PATH, resolvedClaudePath);
 
   const missingNodeError = getMissingNodeError(resolvedClaudePath, enhancedPath);
@@ -97,19 +113,13 @@ export async function runColdStartQuery(
     throw new Error(missingNodeError);
   }
 
-  const settings = config.providerSettings
-    ?? ProviderSettingsCoordinator.getProviderSettingsSnapshot(
-      config.plugin.settings,
-      'claude',
-    );
   const claudeSettings = getClaudeProviderSettings(settings);
-
-  const selectedModel = toClaudeRuntimeModelId(config.model ?? (settings.model as string));
+  const runtimeModel = normalizeClaudeRuntimeModelId(selectedModel);
 
   const options: Options = {
     cwd: vaultPath,
     systemPrompt: config.systemPrompt,
-    model: selectedModel,
+    model: runtimeModel,
     abortController: config.abortController,
     pathToClaudeCodeExecutable: resolvedClaudePath,
     env: {
@@ -143,8 +153,8 @@ export async function runColdStartQuery(
     options.extraArgs = { ...options.extraArgs, 'enable-auto-mode': null };
   }
 
-  if (!config.thinking?.disabled) {
-    const effortLevel = resolveEffortLevel(selectedModel, settings.effortLevel);
+  if (!config.thinking?.disabled && supportsClaudeAdaptiveThinking(runtimeModel)) {
+    const effortLevel = resolveEffortLevel(runtimeModel, settings.effortLevel);
     options.thinking = { type: 'adaptive' };
     // SDK runtime accepts `xhigh` on Opus 4.7+, Sonnet 5+, and Fable, and silently
     // falls back to `high` elsewhere, but its type definition lags our local EffortLevel.

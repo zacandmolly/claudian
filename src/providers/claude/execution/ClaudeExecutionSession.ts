@@ -764,6 +764,16 @@ ClaudeExecutionStrategySink {
         replayConversationHistory,
       );
       if (this.activeRun !== active || active.terminal) return;
+      if (encoded.nativeResumeInvalidated) {
+        if (!request.conversationHistory?.length) {
+          throw new Error(
+            'Claude route changed and native resume cannot be reused without conversation history.',
+          );
+        }
+        this.invalidateNativeResumeForEnvironment();
+        active.nativeFork = false;
+        active.historyReplayGeneration = this.replayHistoryGeneration;
+      }
       this.lastEncodedRequest = encoded;
       this.lastAllowedTools = encoded.allowedTools;
       await this.strategy.startTurn(encoded, active.queryToken);
@@ -789,6 +799,9 @@ ClaudeExecutionStrategySink {
         : {}),
       ...(this.resumeAt ? { resumeAt: this.resumeAt } : {}),
       ...(this.pendingFork ? { fork: true } : {}),
+      ...(typeof this.providerState.environmentFingerprint === 'string'
+        ? { environmentFingerprint: this.providerState.environmentFingerprint }
+        : {}),
     };
   }
 
@@ -838,6 +851,10 @@ ClaudeExecutionStrategySink {
     }
     this.providerSessionId = sessionId;
     this.setProviderStateValue('providerSessionId', sessionId);
+    const environmentFingerprint = this.lastEncodedRequest?.environmentFingerprint;
+    if (environmentFingerprint) {
+      this.setProviderStateValue('environmentFingerprint', environmentFingerprint);
+    }
     this.resumeAt = undefined;
     this.pendingFork = false;
     if (Object.prototype.hasOwnProperty.call(
@@ -852,6 +869,30 @@ ClaudeExecutionStrategySink {
     this.replayHistoryOnNextTurn = true;
     this.replayHistoryGeneration += 1;
     this.setProviderStateValue('historyReplayPending', true);
+  }
+
+  private invalidateNativeResumeForEnvironment(): void {
+    const previousProviderSessionId = this.getNativeResumeSessionId();
+    if (previousProviderSessionId) {
+      const priorIds = Array.isArray(this.providerState.previousProviderSessionIds)
+        ? this.providerState.previousProviderSessionIds.filter(
+          (value): value is string => typeof value === 'string',
+        )
+        : [];
+      this.setProviderStateValue(
+        'previousProviderSessionIds',
+        [...new Set([...priorIds, previousProviderSessionId])],
+      );
+    }
+    this.providerSessionId = null;
+    this.deleteProviderStateValue('providerSessionId');
+    this.resumeAt = undefined;
+    this.pendingFork = false;
+    if (Object.prototype.hasOwnProperty.call(this.providerState, 'forkSource')) {
+      this.deleteProviderStateValue('forkSource');
+    }
+    this.markHistoryReplayPending();
+    this.bumpRevision();
   }
 
   private clearHistoryReplayPending(expectedGeneration: number): void {
@@ -1139,6 +1180,7 @@ ClaudeExecutionStrategySink {
   private clearProviderSession(): void {
     this.providerSessionId = null;
     this.deleteProviderStateValue('providerSessionId');
+    this.deleteProviderStateValue('environmentFingerprint');
   }
 
   private bumpRevision(): void {

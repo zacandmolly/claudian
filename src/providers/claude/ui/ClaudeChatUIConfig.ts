@@ -22,6 +22,7 @@ import {
   getContextWindowSize,
   normalizeEffortLevel,
   normalizeLegacyClaudeModelAlias,
+  supportsClaudeAdaptiveThinking,
   supportsXHighEffort,
 } from '../types/models';
 
@@ -54,15 +55,17 @@ export const claudeChatUIConfig: ProviderChatUIConfig = {
     );
   },
 
-  isAdaptiveReasoningModel(_model: string, _settings: Record<string, unknown>): boolean {
-    return true;
+  isAdaptiveReasoningModel(model: string, _settings: Record<string, unknown>): boolean {
+    return supportsClaudeAdaptiveThinking(toClaudeRuntimeModelId(model));
   },
 
   getReasoningOptions(model: string, _settings: Record<string, unknown>): ProviderReasoningOption[] {
     const runtimeModel = toClaudeRuntimeModelId(model);
-    const levels = supportsXHighEffort(runtimeModel)
-      ? EFFORT_LEVELS
-      : EFFORT_LEVELS.filter(e => e.value !== 'xhigh');
+    const levels = /deepseek/i.test(runtimeModel)
+      ? EFFORT_LEVELS.filter(e => e.value === 'high' || e.value === 'max')
+      : supportsXHighEffort(runtimeModel)
+        ? EFFORT_LEVELS
+        : EFFORT_LEVELS.filter(e => e.value !== 'xhigh');
     return levels.map(e => ({ value: e.value, label: e.label }));
   },
 

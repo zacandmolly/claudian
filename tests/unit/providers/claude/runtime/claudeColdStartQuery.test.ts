@@ -282,6 +282,26 @@ describe('runColdStartQuery', () => {
       const opts = sdkMock.getLastOptions();
       expect(opts?.effort).toBe('high');
     });
+
+    it('omits Claude adaptive flags for an incompatible gateway model', async () => {
+      sdkMock.setMockMessages([]);
+
+      await runColdStartQuery(
+        createConfig({
+          model: 'openrouter/fusion',
+          providerSettings: {
+            model: 'openrouter/fusion',
+            effortLevel: 'max',
+            providerConfigs: { claude: {} },
+          },
+        }),
+        'hi',
+      );
+
+      const opts = sdkMock.getLastOptions();
+      expect(opts?.thinking).toBeUndefined();
+      expect(opts?.effort).toBeUndefined();
+    });
   });
 
   describe('abort handling', () => {
