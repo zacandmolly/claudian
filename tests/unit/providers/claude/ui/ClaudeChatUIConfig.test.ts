@@ -79,6 +79,22 @@ describe('claudeChatUIConfig', () => {
       ]);
     });
 
+    it('keeps configured custom models while built-in defaults are disabled', () => {
+      const options = claudeChatUIConfig.getModelOptions({
+        providerConfigs: {
+          claude: {
+            showDefaultModels: false,
+            customModels: 'deepseek-v4-flash-vision-exp\nclaude-opus-4-8',
+          },
+        },
+      });
+
+      expect(options.map(option => option.value)).toEqual([
+        'claude-code/deepseek-v4-flash-vision-exp',
+        'claude-code/claude-opus-4-8',
+      ]);
+    });
+
     it('deduplicates settings-defined custom models against exact duplicates', () => {
       const options = claudeChatUIConfig.getModelOptions({
         providerConfigs: {

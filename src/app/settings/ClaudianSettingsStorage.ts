@@ -12,6 +12,9 @@ import {
   normalizeHiddenProviderCommands,
 } from '../../core/providers/commands/hiddenCommands';
 import {
+  findProviderModelOption,
+} from '../../core/providers/conversationModel';
+import {
   getSharedEnvironmentVariables,
   inferEnvironmentSnippetScope,
   resolveEnvironmentSnippetScope,
@@ -444,6 +447,29 @@ function migrateLegacyChatModelSelection(
   return model ? { providerId, model } : null;
 }
 
+function hasPreProviderQualifiedChatSelectionMarker(
+  stored: Record<string, unknown>,
+): boolean {
+  const claudeConfig = normalizeProviderConfigs(stored.providerConfigs).claude;
+  return ['enableOpus1M', 'enableSonnet1M'].some(key => (
+    key in stored || Boolean(claudeConfig && key in claudeConfig)
+  ));
+}
+
+function canonicalizeMigratedChatModelSelection(
+  selection: StoredChatModelSelection | null,
+  settings: Record<string, unknown>,
+): StoredChatModelSelection | null {
+  if (!selection) {
+    return null;
+  }
+
+  const option = findProviderModelOption(selection.providerId, selection.model, settings);
+  return option && option !== selection.model
+    ? { ...selection, model: option }
+    : selection;
+}
+
 export class ClaudianSettingsStorage {
   constructor(private adapter: VaultFileAdapter) {}
 
@@ -459,11 +485,14 @@ export class ClaudianSettingsStorage {
       stored,
       'lastSelectedChatModel',
     );
-    const lastSelectedChatModel = hasStoredChatModelSelection
-      ? normalizeStoredChatModelSelection(stored.lastSelectedChatModel)
-      : migrateLegacyChatModelSelection(stored);
-    const didNormalizeChatModelSelection = !hasStoredChatModelSelection
-      || JSON.stringify(lastSelectedChatModel) !== JSON.stringify(stored.lastSelectedChatModel);
+    const shouldMigrateLegacyChatModelSelection = !hasStoredChatModelSelection
+      || (
+        stored.lastSelectedChatModel === null
+        && hasPreProviderQualifiedChatSelectionMarker(stored)
+      );
+    const initialLastSelectedChatModel = shouldMigrateLegacyChatModelSelection
+      ? migrateLegacyChatModelSelection(stored)
+      : normalizeStoredChatModelSelection(stored.lastSelectedChatModel);
     const hiddenProviderCommands = mergeLegacyClaudeHiddenCommands(
       normalizeHiddenProviderCommands(stored.hiddenProviderCommands),
       stored.hiddenSlashCommands,
@@ -527,7 +556,7 @@ export class ClaudianSettingsStorage {
       collabGitPath,
       sessionManagerOrganization,
       pinnedLinkedContentPaths,
-      lastSelectedChatModel,
+      lastSelectedChatModel: initialLastSelectedChatModel,
     };
 
     const merged = {
@@ -542,6 +571,12 @@ export class ClaudianSettingsStorage {
         legacyProviderSettings,
       ) || didNormalizeProviderSettings;
     }
+    const lastSelectedChatModel = shouldMigrateLegacyChatModelSelection
+      ? canonicalizeMigratedChatModelSelection(initialLastSelectedChatModel, merged)
+      : initialLastSelectedChatModel;
+    merged.lastSelectedChatModel = lastSelectedChatModel;
+    const didNormalizeChatModelSelection = !hasStoredChatModelSelection
+      || JSON.stringify(lastSelectedChatModel) !== JSON.stringify(stored.lastSelectedChatModel);
     const didNormalizeHostScopedProviderConfigs = hasHostScopedProviderConfigNormalization(
       providerConfigs,
       merged.providerConfigs,

@@ -65,7 +65,7 @@ export function getClaudeModelOptions(settings: Record<string, unknown>): Claude
   }
 
   const claudeSettings = getClaudeProviderSettings(settings);
-  const models = [...DEFAULT_CLAUDE_MODELS];
+  const models = claudeSettings.showDefaultModels ? [...DEFAULT_CLAUDE_MODELS] : [];
 
   const seenModelIds = new Set(models.map(model =>
     normalizeLegacyClaudeModelAlias(toClaudeRuntimeModelId(model.value))

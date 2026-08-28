@@ -192,6 +192,47 @@ describe('ClaudianSettingsStorage', () => {
       expect(mockAdapter.write).not.toHaveBeenCalled();
     });
 
+    it('migrates a pre-2.2.4 null chat seed to the provider-qualified custom model once', async () => {
+      mockAdapter.exists.mockResolvedValue(true);
+      mockAdapter.read.mockResolvedValue(JSON.stringify({
+        settingsProvider: 'claude',
+        model: 'deepseek-v4-flash-vision-exp',
+        savedProviderModel: {
+          claude: 'deepseek-v4-flash-vision-exp',
+        },
+        lastSelectedChatModel: null,
+        providerConfigs: {
+          claude: {
+            enableOpus1M: true,
+            showDefaultModels: false,
+            customModels: 'deepseek-v4-flash-vision-exp\nclaude-opus-4-8',
+            routingPolicy: { pool: 'stable' },
+          },
+        },
+      }));
+
+      const result = await storage.load();
+      const persisted = JSON.parse(mockAdapter.write.mock.calls[0][1]);
+
+      expect(result.lastSelectedChatModel).toEqual({
+        providerId: 'claude',
+        model: 'claude-code/deepseek-v4-flash-vision-exp',
+      });
+      expect(persisted.lastSelectedChatModel).toEqual(result.lastSelectedChatModel);
+      expect(persisted.providerConfigs.claude).toEqual(expect.objectContaining({
+        showDefaultModels: false,
+        routingPolicy: { pool: 'stable' },
+      }));
+      expect(persisted.providerConfigs.claude).not.toHaveProperty('enableOpus1M');
+
+      mockAdapter.write.mockClear();
+      mockAdapter.read.mockResolvedValue(JSON.stringify(persisted));
+      const reloaded = await storage.load();
+
+      expect(reloaded.lastSelectedChatModel).toEqual(result.lastSelectedChatModel);
+      expect(mockAdapter.write).not.toHaveBeenCalled();
+    });
+
     it('normalizes a malformed stored chat model selection to null', async () => {
       mockAdapter.exists.mockResolvedValue(true);
       mockAdapter.read.mockResolvedValue(JSON.stringify({
