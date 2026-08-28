@@ -2,9 +2,14 @@
 
 import {
   createProviderIconSvg,
+  DEEPSEEK_PROVIDER_ICON,
+  KIMI_PROVIDER_ICON,
   OPENAI_PROVIDER_ICON,
   OPENCODE_PROVIDER_ICON,
+  OPENROUTER_PROVIDER_ICON,
   PI_PROVIDER_ICON,
+  resolveProviderGroupForModelId,
+  resolveProviderIconForModelId,
 } from '@/shared/icons';
 
 describe('createProviderIconSvg', () => {
@@ -52,5 +57,24 @@ describe('createProviderIconSvg', () => {
     expect(paths).toHaveLength(2);
     expect(paths[0].getAttribute('fill-rule')).toBe('evenodd');
     expect(paths.every(path => path.getAttribute('fill') === 'currentColor')).toBe(true);
+  });
+});
+
+describe('model provider metadata', () => {
+  it.each([
+    ['claude-code/openai/gpt-5.6-terra', 'GPT', OPENAI_PROVIDER_ICON],
+    ['claude-code/gpt-5.6-sol', 'GPT', OPENAI_PROVIDER_ICON],
+    ['claude-code/moonshotai/kimi-k3', 'Kimi', KIMI_PROVIDER_ICON],
+    ['claude-code/deepseek/deepseek-v4-pro', 'DeepSeek', DEEPSEEK_PROVIDER_ICON],
+    ['claude-code/openrouter/fusion', 'OpenRouter', OPENROUTER_PROVIDER_ICON],
+    ['claude-code/anthropic/claude-opus-4.8', 'OpenRouter', OPENROUTER_PROVIDER_ICON],
+  ])('decodes %s before resolving its group and icon', (model, group, icon) => {
+    expect(resolveProviderGroupForModelId(model)).toBe(group);
+    expect(resolveProviderIconForModelId(model)).toBe(icon);
+  });
+
+  it('recognizes provider-qualified native Codex model families without assigning gateway icons', () => {
+    expect(resolveProviderGroupForModelId('openai-codex/gpt-5.6-sol')).toBe('GPT');
+    expect(resolveProviderIconForModelId('openai-codex/gpt-5.6-sol')).toBeUndefined();
   });
 });

@@ -1,6 +1,10 @@
 import { getRuntimeEnvironmentVariables } from '../../core/providers/providerEnvironment';
 import type { ProviderUIOption } from '../../core/providers/types';
 import {
+  resolveProviderGroupForModelId,
+  resolveProviderIconForModelId,
+} from '../../shared/icons';
+import {
   type ClaudeModelEnvType,
   getModelsFromEnvironment,
 } from './env/claudeModelEnv';
@@ -12,6 +16,39 @@ import { DEFAULT_CLAUDE_MODELS, normalizeLegacyClaudeModelAlias } from './types/
 
 export interface ClaudeModelOption extends ProviderUIOption {
   environmentTypes?: readonly ClaudeModelEnvType[];
+}
+
+const MODEL_GROUP_VISUAL_ORDER = [
+  'Claude',
+  'OpenRouter',
+  'Kimi',
+  'DeepSeek',
+  'GPT',
+] as const;
+
+function getModelGroupVisualRank(option: ProviderUIOption): number {
+  const group = option.group ?? resolveProviderGroupForModelId(option.value);
+  const rank = MODEL_GROUP_VISUAL_ORDER.indexOf(
+    group as typeof MODEL_GROUP_VISUAL_ORDER[number],
+  );
+  return rank === -1 ? MODEL_GROUP_VISUAL_ORDER.length : rank;
+}
+
+function sortModelOptionsForMenu(models: ClaudeModelOption[]): ClaudeModelOption[] {
+  // InputToolbar renders model options in reverse, so keep this in reverse visual order.
+  return [...models].sort((left, right) => (
+    getModelGroupVisualRank(right) - getModelGroupVisualRank(left)
+  ));
+}
+
+function withModelMenuMetadata(option: ClaudeModelOption): ClaudeModelOption {
+  const providerIcon = option.providerIcon ?? resolveProviderIconForModelId(option.value);
+  const group = option.group ?? resolveProviderGroupForModelId(option.value);
+  return {
+    ...option,
+    ...(group ? { group } : {}),
+    ...(providerIcon ? { providerIcon } : {}),
+  };
 }
 
 function parseConfiguredCustomModelIds(value: string): string[] {
@@ -58,14 +95,16 @@ export function getClaudeModelOptions(settings: Record<string, unknown>): Claude
     customModelAliases,
   );
   if (customModels.length > 0) {
-    return customModels.map((model) => ({
+    return customModels.map((model) => withModelMenuMetadata({
       ...model,
       value: encodeClaudeModelSelectionId(model.value),
     }));
   }
 
   const claudeSettings = getClaudeProviderSettings(settings);
-  const models = claudeSettings.showDefaultModels ? [...DEFAULT_CLAUDE_MODELS] : [];
+  const models: ClaudeModelOption[] = claudeSettings.showDefaultModels
+    ? [...DEFAULT_CLAUDE_MODELS]
+    : [];
 
   const seenModelIds = new Set(models.map(model =>
     normalizeLegacyClaudeModelAlias(toClaudeRuntimeModelId(model.value))
@@ -78,14 +117,20 @@ export function getClaudeModelOptions(settings: Record<string, unknown>): Claude
     }
 
     seenModelIds.add(normalizedModelId);
-    models.push({
+    models.push(withModelMenuMetadata({
       value: encodeClaudeModelSelectionId(modelId),
       label: customModelAliases[modelId] ?? formatCustomModelLabel(modelId),
       description: 'Custom model',
-    });
+    }));
   }
 
-  return models;
+  return models.map(withModelMenuMetadata);
+}
+
+export function getClaudeModelMenuOptions(
+  settings: Record<string, unknown>,
+): ClaudeModelOption[] {
+  return sortModelOptionsForMenu(getClaudeModelOptions(settings));
 }
 
 export function findClaudeModelOption(

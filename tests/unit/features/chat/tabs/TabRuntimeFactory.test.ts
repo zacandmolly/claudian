@@ -1061,6 +1061,74 @@ describe('Tab provider execution ownership', () => {
     globalThis.ResizeObserver = originalResizeObserver;
   });
 
+  it('routes a deduplicated mixed-picker GPT model through its source provider', async () => {
+    const getChatUIConfig = ProviderRegistry.getChatUIConfig as jest.Mock;
+    const getEnabledProviderIds = ProviderRegistry.getEnabledProviderIds as jest.Mock;
+    const getProviderDisplayName = ProviderRegistry.getProviderDisplayName as jest.Mock;
+    const resolveProviderForModel = ProviderRegistry.resolveProviderForModel as jest.Mock;
+    const claudeConfig = getChatUIConfig('claude');
+    const claudePickerConfig = {
+      ...claudeConfig,
+      getModelOptions: jest.fn().mockReturnValue([{
+        label: 'Gateway Terra',
+        value: 'claude-code/openai/gpt-5.6-terra',
+      }]),
+    };
+    const codexConfig = {
+      ...claudeConfig,
+      getModelOptions: jest.fn().mockReturnValue([{
+        label: 'Native Terra',
+        value: 'gpt-5.6-terra',
+      }]),
+    };
+    getChatUIConfig.mockImplementation((providerId: string) => (
+      providerId === 'codex' ? codexConfig : claudePickerConfig
+    ));
+    getEnabledProviderIds.mockReturnValue(['claude', 'codex']);
+    getProviderDisplayName.mockImplementation((providerId: string) => (
+      providerId === 'codex' ? 'Codex' : 'Claude'
+    ));
+    // Reproduces the ambiguous raw-id resolver path that source ownership must override.
+    resolveProviderForModel.mockReturnValue('claude');
+
+    try {
+      const plugin = createPlugin();
+      plugin.settings.settingsProvider = 'codex';
+      const onProviderChanged = jest.fn().mockResolvedValue(undefined);
+      const tab = await createTestTab({
+        plugin,
+        containerEl: createMockEl() as any,
+      }, { onProviderChanged });
+      const modelOptions = Array.from(
+        tab.dom.inputWrapper.querySelectorAll(
+          '.claudian-model-option',
+        ) as NodeListOf<HTMLElement>,
+      );
+      const nativeTerra = modelOptions.find(option =>
+        Array.from(option.children).some(child => child.textContent === 'Native Terra')
+      );
+
+      expect(modelOptions.some(option =>
+        Array.from(option.children).some(child => child.textContent === 'Gateway Terra')
+      )).toBe(false);
+      (nativeTerra as HTMLElement | undefined)?.click();
+      await new Promise<void>(resolve => setImmediate(resolve));
+
+      expect(onProviderChanged).toHaveBeenCalledWith('codex');
+      expect(tab.providerId).toBe('codex');
+      expect(tab.draftModel).toBe('gpt-5.6-terra');
+      expect(plugin.settings.lastSelectedChatModel).toEqual({
+        providerId: 'codex',
+        model: 'gpt-5.6-terra',
+      });
+    } finally {
+      getChatUIConfig.mockReturnValue(claudeConfig);
+      getEnabledProviderIds.mockReturnValue(['claude']);
+      getProviderDisplayName.mockReturnValue('Claude');
+      resolveProviderForModel.mockReturnValue('claude');
+    }
+  });
+
   it('does not seed a model choice whose tab closes during provider initialization', async () => {
     const getChatUIConfig = ProviderRegistry.getChatUIConfig as jest.Mock;
     const getEnabledProviderIds = ProviderRegistry.getEnabledProviderIds as jest.Mock;
@@ -1319,6 +1387,102 @@ describe('Tab provider execution ownership', () => {
     });
     expect(tab.providerId).toBe('claude');
     globalThis.ResizeObserver = originalResizeObserver;
+  });
+
+  it('prefers a bound provider option over another provider\'s broad legacy matcher', async () => {
+    const uiConfig = ProviderRegistry.getChatUIConfig('claude');
+    const resolveProviderForModel = ProviderRegistry.resolveProviderForModel as jest.Mock;
+    (uiConfig.getModelOptions as jest.Mock).mockReturnValue([
+      { label: 'Claude Default', value: 'claude-default' },
+      { label: 'Legacy GPT Gateway', value: 'gpt-legacy' },
+    ]);
+    resolveProviderForModel.mockReturnValue('codex');
+
+    try {
+      const conversation = createConversation();
+      const plugin = createPlugin({
+        updateConversation: jest.fn().mockResolvedValue(undefined),
+      });
+      const tab = await createTestTab({
+        plugin,
+        containerEl: createMockEl() as any,
+        conversation,
+      });
+      const modelOptions = Array.from(
+        tab.dom.inputWrapper.querySelectorAll(
+          '.claudian-model-option',
+        ) as NodeListOf<HTMLElement>,
+      );
+      const legacyGateway = modelOptions.find(option =>
+        Array.from(option.children).some(child => child.textContent === 'Legacy GPT Gateway')
+      );
+
+      (legacyGateway as HTMLElement | undefined)?.click();
+      await new Promise<void>(resolve => setImmediate(resolve));
+
+      expect(resolveProviderForModel).not.toHaveBeenCalledWith(
+        'gpt-legacy',
+        plugin.settings,
+        {
+          onlyEnabledProviders: true,
+          fallbackProviderId: 'claude',
+        },
+      );
+      expect(plugin.updateConversation).toHaveBeenCalledWith(conversation.id, {
+        selectedModel: 'gpt-legacy',
+      });
+      expect(tab.providerId).toBe('claude');
+    } finally {
+      resolveProviderForModel.mockReturnValue('claude');
+      (uiConfig.getModelOptions as jest.Mock).mockReturnValue([
+        { label: 'Claude Default', value: 'claude-default' },
+        { label: 'Claude Alternate', value: 'claude-alternate' },
+      ]);
+    }
+  });
+
+  it('rejects an explicitly foreign model id even when that provider is disabled', async () => {
+    const uiConfig = ProviderRegistry.getChatUIConfig('claude');
+    const isEnabled = ProviderRegistry.isEnabled as jest.Mock;
+    isEnabled.mockImplementation((providerId: string) => providerId !== 'codex');
+    (uiConfig.getModelOptions as jest.Mock).mockReturnValue([
+      { label: 'Claude Default', value: 'claude-default' },
+      { label: 'Disabled Codex Model', value: 'openai-codex/gpt-disabled' },
+    ]);
+
+    try {
+      const conversation = createConversation();
+      const plugin = createPlugin({
+        updateConversation: jest.fn().mockResolvedValue(undefined),
+      });
+      const tab = await createTestTab({
+        plugin,
+        containerEl: createMockEl() as any,
+        conversation,
+      });
+      plugin.updateConversation.mockClear();
+      const modelOptions = Array.from(
+        tab.dom.inputWrapper.querySelectorAll(
+          '.claudian-model-option',
+        ) as NodeListOf<HTMLElement>,
+      );
+      const foreignModel = modelOptions.find(option =>
+        Array.from(option.children).some(child => child.textContent === 'Disabled Codex Model')
+      );
+
+      (foreignModel as HTMLElement | undefined)?.click();
+      await new Promise<void>(resolve => setImmediate(resolve));
+
+      expect(plugin.updateConversation).not.toHaveBeenCalled();
+      expect(plugin.settings.lastSelectedChatModel).toBeUndefined();
+      expect(tab.providerId).toBe('claude');
+    } finally {
+      isEnabled.mockReturnValue(true);
+      (uiConfig.getModelOptions as jest.Mock).mockReturnValue([
+        { label: 'Claude Default', value: 'claude-default' },
+        { label: 'Claude Alternate', value: 'claude-alternate' },
+      ]);
+    }
   });
 
   it('does not seed a bound model choice after its commit loses runtime ownership', async () => {

@@ -40,6 +40,18 @@ describe('claudeChatUIConfig', () => {
         },
       })).toBe('claude-code/claude-sonnet-gateway');
     });
+
+    it('keeps configured fallback order independent from visual menu grouping', () => {
+      expect(claudeChatUIConfig.getDefaultModel?.({
+        providerConfigs: {
+          claude: {
+            showDefaultModels: false,
+            defaultModel: 'retired-model',
+            customModels: 'claude-opus-4.8\nopenai/gpt-5.6-terra',
+          },
+        },
+      })).toBe('claude-code/claude-opus-4.8');
+    });
   });
 
   it('defaults Claude models to high effort', () => {
@@ -70,11 +82,13 @@ describe('claudeChatUIConfig', () => {
           value: 'claude-code/claude-opus-4-6',
           label: 'Opus 4.6',
           description: 'Custom model',
+          group: 'Claude',
         },
         {
           value: 'claude-code/claude-opus-4-6[1m]',
           label: 'Opus 4.6 (1M)',
           description: 'Custom model',
+          group: 'Claude',
         },
       ]);
     });
@@ -126,6 +140,7 @@ describe('claudeChatUIConfig', () => {
         value: 'claude-code/claude-opus-4-5-20251101',
         label: 'Opus 4.5 (2511)',
         description: 'Custom model',
+        group: 'Claude',
       });
     });
 
@@ -142,6 +157,7 @@ describe('claudeChatUIConfig', () => {
         value: 'claude-code/claude-fable-6',
         label: 'Fable 6',
         description: 'Custom model',
+        group: 'Claude',
       });
     });
 
@@ -161,6 +177,7 @@ describe('claudeChatUIConfig', () => {
         value: 'claude-code/claude-opus-4-6',
         label: 'Work Opus',
         description: 'Custom model',
+        group: 'Claude',
       });
     });
 
@@ -180,6 +197,7 @@ describe('claudeChatUIConfig', () => {
           label: 'Sonnet 4.5',
           description: 'Custom model (model)',
           environmentTypes: ['model'],
+          group: 'Claude',
         },
       ]);
     });
@@ -202,6 +220,7 @@ describe('claudeChatUIConfig', () => {
           label: 'Gateway Sonnet',
           description: 'Custom model (model)',
           environmentTypes: ['model'],
+          group: 'Claude',
         },
       ]);
     });

@@ -9,6 +9,7 @@ import { CLAUDE_PROVIDER_ICON } from '../../../shared/icons';
 import { getCustomModelIds } from '../env/claudeModelEnv';
 import {
   findClaudeModelOption,
+  getClaudeModelMenuOptions,
   getClaudeModelOptions,
   resolveClaudeModelEnvironmentTypePreference,
 } from '../modelOptions';
@@ -37,7 +38,7 @@ const CLAUDE_PERMISSION_MODE_TOGGLE: ProviderPermissionModeToggleConfig = {
 
 export const claudeChatUIConfig: ProviderChatUIConfig = {
   getModelOptions(settings) {
-    return getClaudeModelOptions(settings);
+    return getClaudeModelMenuOptions(settings);
   },
 
   getDefaultModel(settings) {
