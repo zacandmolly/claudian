@@ -23,6 +23,7 @@ The execution session owns the live provider snapshot. History services reconstr
 ## Design Rules
 
 - Keep the persistent SDK query alive across turns when possible. Update model, permission mode, and effort through SDK calls.
+- `supportsClaudeAdaptiveThinking` is true for Claude and DeepSeek routes only. Unprefixed and provider-qualified GPT ids, including GPT-6, must not receive Claude adaptive-thinking flags.
 - Claude's provider fallback model is a user preference resolved against the current dynamic model options, including environment-mapped and custom options. Fresh settings prefer the Opus tier; an unavailable preference falls back without changing existing conversations or the global future-tab seed.
 - Restart the persistent query when the effective system prompt, disabled-tool set, plugin set, settings source set, CLI path, Chrome enablement, auto-mode enablement, or external context paths change.
 - Do not duplicate assistant text. The SDK can emit text incrementally and again in the final assistant message; stream handling must preserve the existing dedupe behavior.

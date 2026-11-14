@@ -174,6 +174,55 @@ describe('Codex models', () => {
     expect(resolveCodexModelServiceTier(model, selectedServiceTier)).toBe(expectedServiceTier);
   });
 
+  it('preserves a wire context window and drops restricted or hidden-visibility models', () => {
+    expect(normalizeCodexDiscoveredModels([
+      {
+        ...rawModels[0],
+        contextWindow: 272_000,
+      },
+      {
+        ...rawModels[0],
+        id: 'gpt-6-cyber',
+        model: 'gpt-6-cyber',
+        displayName: 'GPT-6 Cyber',
+        hidden: false,
+        isDefault: false,
+      },
+      {
+        ...rawModels[0],
+        id: 'gpt-daybreak-red-latest',
+        model: 'gpt-daybreak-red-latest',
+        displayName: 'Daybreak Red',
+        hidden: false,
+        visibility: 'hide',
+        isDefault: false,
+      },
+      {
+        ...rawModels[0],
+        id: 'gpt-6-sol',
+        model: 'gpt-6-sol',
+        displayName: 'GPT-6-Sol',
+        hidden: false,
+        modelSpecialty: 'cyber',
+        isDefault: false,
+      },
+      {
+        ...rawModels[0],
+        id: 'gpt-hidden-picker',
+        model: 'gpt-hidden-picker',
+        displayName: 'Hidden picker',
+        hidden: false,
+        showInPicker: false,
+        isDefault: false,
+      },
+    ])).toEqual([
+      expect.objectContaining({
+        model: 'gpt-5.6-sol',
+        contextWindow: 272_000,
+      }),
+    ]);
+  });
+
   it('rejects malformed entries, hidden entries, duplicate models, and invalid defaults', () => {
     expect(normalizeCodexDiscoveredModels([
       ...rawModels,

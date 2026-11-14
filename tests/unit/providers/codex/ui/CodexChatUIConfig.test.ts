@@ -325,6 +325,35 @@ describe('CodexChatUIConfig', () => {
   });
 
   describe('getReasoningOptions', () => {
+    it('uses the public GPT-6 contract before a catalog entry arrives and keeps Ultra opt-in', () => {
+      const settings = {
+        providerConfigs: {
+          codex: {
+            discoveredModels: [],
+            enableUltraEffort: false,
+          },
+        },
+      };
+      const ultraEnabled = {
+        providerConfigs: {
+          codex: {
+            discoveredModels: [],
+            enableUltraEffort: true,
+          },
+        },
+      };
+
+      expect(codexChatUIConfig.getReasoningOptions('gpt-6-astra', settings).map(option => option.value))
+        .toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+      expect(codexChatUIConfig.getReasoningOptions('gpt-6-astra', ultraEnabled).map(option => option.value))
+        .toEqual(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+      expect(codexChatUIConfig.getReasoningOptions('gpt-6-luna', ultraEnabled).map(option => option.value))
+        .toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+      expect(codexChatUIConfig.getReasoningOptions('gpt-5.5', ultraEnabled).map(option => option.value))
+        .toEqual(['low', 'medium', 'high', 'xhigh']);
+      expect(codexChatUIConfig.getDefaultReasoningValue('gpt-6.1-sol', settings)).toBe('high');
+    });
+
     it('keeps max available before the runtime catalog loads', () => {
       const options = codexChatUIConfig.getReasoningOptions('gpt-runtime-model', {
         providerConfigs: {
@@ -512,8 +541,32 @@ describe('CodexChatUIConfig', () => {
   });
 
   describe('getContextWindowSize', () => {
-    it('should return 200000 for all models', () => {
-      expect(codexChatUIConfig.getContextWindowSize(TEST_CODEX_MODEL)).toBe(200_000);
+    it('uses the Codex catalog window for known GPT ids and 200000 otherwise', () => {
+      expect(codexChatUIConfig.getContextWindowSize('gpt-6-astra')).toBe(272_000);
+      expect(codexChatUIConfig.getContextWindowSize('gpt-6.1-terra')).toBe(500_000);
+      expect(codexChatUIConfig.getContextWindowSize(TEST_CODEX_MODEL)).toBe(272_000);
+      expect(codexChatUIConfig.getContextWindowSize('gpt-unknown')).toBe(200_000);
+    });
+
+    it('prefers a context window reported by the discovered catalog', () => {
+      expect(codexChatUIConfig.getContextWindowSize('gpt-6.1-terra', undefined, {
+        providerConfigs: {
+          codex: {
+            discoveredModels: [{
+              model: 'gpt-6.1-terra',
+              displayName: 'GPT-6.1 Terra',
+              description: 'Wire',
+              supportedReasoningEfforts: [{ value: 'low', description: 'Fast' }],
+              defaultReasoningEffort: 'low',
+              serviceTiers: [],
+              defaultServiceTier: null,
+              inputModalities: ['text', 'image'],
+              isDefault: false,
+              contextWindow: 400_000,
+            }],
+          },
+        },
+      })).toBe(400_000);
     });
   });
 

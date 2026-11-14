@@ -14,9 +14,10 @@ import { getCodexModelOptions } from '../modelOptions';
 import {
   CODEX_DEFAULT_SERVICE_TIER,
   CODEX_FALLBACK_REASONING_EFFORT_VALUES,
-  findCodexModel,
+  findCodexModelCapability,
   getCodexDefaultReasoningEffort,
   getCodexFastServiceTier,
+  getCodexModelContextWindow,
   getCodexReasoningEffortOptions,
   getDefaultCodexModel,
   isCodexModelAvailable,
@@ -97,7 +98,7 @@ export const codexChatUIConfig: ProviderChatUIConfig = {
 
   getReasoningOptions(modelId: string, settings: Record<string, unknown>): ProviderReasoningOption[] {
     const codexSettings = getCodexProviderSettings(settings);
-    const model = findCodexModel(
+    const model = findCodexModelCapability(
       codexSettings.discoveredModels,
       modelId,
     );
@@ -114,7 +115,7 @@ export const codexChatUIConfig: ProviderChatUIConfig = {
 
   getDefaultReasoningValue(modelId: string, settings: Record<string, unknown>): string {
     const codexSettings = getCodexProviderSettings(settings);
-    const model = findCodexModel(
+    const model = findCodexModelCapability(
       codexSettings.discoveredModels,
       modelId,
     );
@@ -124,8 +125,15 @@ export const codexChatUIConfig: ProviderChatUIConfig = {
       : DEFAULT_REASONING_VALUE;
   },
 
-  getContextWindowSize(): number {
-    return DEFAULT_CONTEXT_WINDOW;
+  getContextWindowSize(
+    model: string,
+    _customLimits?: Record<string, number>,
+    settings?: Record<string, unknown>,
+  ): number {
+    const discoveredModels = settings
+      ? getCodexProviderSettings(settings).discoveredModels
+      : [];
+    return getCodexModelContextWindow(discoveredModels, model) ?? DEFAULT_CONTEXT_WINDOW;
   },
 
   isDefaultModel(model: string): boolean {
@@ -171,7 +179,7 @@ export const codexChatUIConfig: ProviderChatUIConfig = {
   },
 
   getServiceTierToggle(settings): ProviderServiceTierToggleConfig | null {
-    const model = findCodexModel(
+    const model = findCodexModelCapability(
       getCodexProviderSettings(settings).discoveredModels,
       typeof settings.model === 'string' ? settings.model : undefined,
     );

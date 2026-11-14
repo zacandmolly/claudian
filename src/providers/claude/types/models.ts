@@ -147,6 +147,13 @@ function getProviderQualifiedModelParts(
     };
 }
 
+function isOpenAiGptModel(model: string): boolean {
+  const normalized = normalizeModelId(model).replace(/\[1m\]$/, '');
+  const parts = getProviderQualifiedModelParts(normalized);
+  const slug = parts?.slug ?? normalized;
+  return slug.startsWith('gpt-');
+}
+
 function isDeepSeekModel(model: string): boolean {
   const normalized = normalizeModelId(model).replace(/\[1m\]$/, '');
   const parts = getProviderQualifiedModelParts(normalized);
@@ -154,7 +161,10 @@ function isDeepSeekModel(model: string): boolean {
   return parts?.provider === 'deepseek' || slug.includes('deepseek');
 }
 
-/** Whether the Claude adapter may send native adaptive-thinking flags. */
+/**
+ * Whether the Claude adapter may send native adaptive-thinking flags.
+ * GPT ids are never Claude-native, whether or not they carry an `openai/` prefix.
+ */
 export function supportsClaudeAdaptiveThinking(model: string): boolean {
   const normalized = normalizeModelId(model);
   if (!normalized) {
@@ -168,6 +178,9 @@ export function supportsClaudeAdaptiveThinking(model: string): boolean {
   }
   if (resolveClaudeModelTierAlias(normalized)) {
     return true;
+  }
+  if (isOpenAiGptModel(normalized)) {
+    return false;
   }
   const parts = getProviderQualifiedModelParts(normalized);
   if (!parts) {

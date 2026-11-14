@@ -2,6 +2,11 @@ import {
   DEFAULT_REASONING_VALUE,
   resolvePreferredReasoningDefault,
 } from '../../core/providers/reasoning';
+import {
+  getCodexNativeCatalogModel,
+  getCodexNativeContextWindow,
+  isRestrictedCodexCatalogModel,
+} from './CodexNativeCatalogContract';
 import { toCodexRuntimeModelId } from './modelSelection';
 import { formatCodexModelLabel } from './types/models';
 
@@ -26,6 +31,7 @@ export interface CodexDiscoveredModel {
   defaultServiceTier: string | null;
   inputModalities: Array<'text' | 'image'>;
   isDefault: boolean;
+  contextWindow?: number;
 }
 
 export const CODEX_FALLBACK_REASONING_EFFORT_VALUES = [
@@ -108,6 +114,33 @@ function normalizeServiceTiers(value: unknown): CodexModelServiceTier[] {
   return tiers;
 }
 
+function normalizeContextWindow(value: unknown): number | undefined {
+  return typeof value === 'number' && value > 0 && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function isVisibleCodexCatalogEntry(entry: Record<string, unknown>): boolean {
+  if (entry.hidden === true || entry.showInPicker === false || entry.show_in_picker === false) {
+    return false;
+  }
+
+  const visibility = typeof entry.visibility === 'string'
+    ? entry.visibility.trim().toLowerCase()
+    : '';
+  if (visibility === 'hide' || visibility === 'none') {
+    return false;
+  }
+
+  const specialty = entry.modelSpecialty ?? entry.model_specialty;
+  if (typeof specialty === 'string' && specialty.trim().toLowerCase() === 'cyber') {
+    return false;
+  }
+
+  const model = entry.model ?? entry.id;
+  return typeof model !== 'string' || !isRestrictedCodexCatalogModel(model);
+}
+
 function normalizeInputModalities(value: unknown): Array<'text' | 'image'> {
   if (value === undefined) {
     return [...DEFAULT_INPUT_MODALITIES];
@@ -133,7 +166,7 @@ export function normalizeCodexDiscoveredModels(value: unknown): CodexDiscoveredM
   const models: CodexDiscoveredModel[] = [];
   const seen = new Set<string>();
   for (const entry of value) {
-    if (!isRecord(entry) || entry.hidden === true) {
+    if (!isRecord(entry) || !isVisibleCodexCatalogEntry(entry)) {
       continue;
     }
 
@@ -153,6 +186,7 @@ export function normalizeCodexDiscoveredModels(value: unknown): CodexDiscoveredM
 
     const serviceTiers = normalizeServiceTiers(entry.serviceTiers);
     const defaultServiceTier = normalizeNonEmptyString(entry.defaultServiceTier);
+    const contextWindow = normalizeContextWindow(entry.contextWindow ?? entry.context_window);
 
     seen.add(model);
     models.push({
@@ -165,6 +199,7 @@ export function normalizeCodexDiscoveredModels(value: unknown): CodexDiscoveredM
       defaultServiceTier,
       inputModalities: normalizeInputModalities(entry.inputModalities),
       isDefault: entry.isDefault === true,
+      ...(contextWindow !== undefined ? { contextWindow } : {}),
     });
   }
 
@@ -181,6 +216,46 @@ export function findCodexModel(
 
   const runtimeModelId = toCodexRuntimeModelId(modelId);
   return models.find(model => model.model === runtimeModelId) ?? null;
+}
+
+function contractModelToDiscovered(modelId: string): CodexDiscoveredModel | null {
+  const contract = getCodexNativeCatalogModel(toCodexRuntimeModelId(modelId));
+  if (!contract) {
+    return null;
+  }
+
+  return {
+    model: contract.model,
+    displayName: contract.displayName,
+    description: contract.description,
+    supportedReasoningEfforts: contract.supportedReasoningEfforts.map(option => ({ ...option })),
+    defaultReasoningEffort: contract.defaultReasoningEffort,
+    serviceTiers: contract.serviceTiers.map(tier => ({ ...tier })),
+    defaultServiceTier: contract.defaultServiceTier,
+    inputModalities: [...contract.inputModalities],
+    isDefault: false,
+    contextWindow: contract.contextWindow,
+  };
+}
+
+/** Discovered metadata wins. Known public ids fill reasoning and context before discovery. */
+export function findCodexModelCapability(
+  models: CodexDiscoveredModel[],
+  modelId: string | undefined,
+): CodexDiscoveredModel | null {
+  return findCodexModel(models, modelId)
+    ?? (modelId ? contractModelToDiscovered(modelId) : null);
+}
+
+export function getCodexModelContextWindow(
+  models: CodexDiscoveredModel[],
+  modelId: string,
+): number | null {
+  const discovered = findCodexModel(models, modelId);
+  if (discovered?.contextWindow) {
+    return discovered.contextWindow;
+  }
+  return getCodexNativeContextWindow(toCodexRuntimeModelId(modelId));
 }
 
 export function getDefaultCodexModel(

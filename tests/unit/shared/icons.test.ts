@@ -64,6 +64,9 @@ describe('model provider metadata', () => {
   it.each([
     ['claude-code/openai/gpt-5.6-terra', 'GPT', OPENAI_PROVIDER_ICON],
     ['claude-code/gpt-5.6-sol', 'GPT', OPENAI_PROVIDER_ICON],
+    ['claude-code/openai/gpt-6-astra', 'GPT', OPENAI_PROVIDER_ICON],
+    ['claude-code/gpt-6.1-terra', 'GPT', OPENAI_PROVIDER_ICON],
+    ['claude-code/gpt-6-cyber', 'GPT', OPENAI_PROVIDER_ICON],
     ['claude-code/moonshotai/kimi-k3', 'Kimi', KIMI_PROVIDER_ICON],
     ['claude-code/deepseek/deepseek-v4-pro', 'DeepSeek', DEEPSEEK_PROVIDER_ICON],
     ['claude-code/openrouter/fusion', 'OpenRouter', OPENROUTER_PROVIDER_ICON],

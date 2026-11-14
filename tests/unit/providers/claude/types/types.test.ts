@@ -801,6 +801,16 @@ describe('types.ts', () => {
       expect(supportsClaudeAdaptiveThinking('openai/gpt-5.6-terra')).toBe(false);
       expect(supportsClaudeAdaptiveThinking('anthropic/not-a-claude-model')).toBe(false);
     });
+
+    it('omits Claude-native flags for unprefixed GPT ids, including GPT-6', () => {
+      expect(supportsClaudeAdaptiveThinking('gpt-5.6-sol')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('GPT-6-Astra')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('gpt-6.1-terra')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('gpt-6.1-sol[1m]')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('gpt-6-cyber')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('openai/gpt-6-astra')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('claude-code/gpt-6.1-terra')).toBe(false);
+    });
   });
 
   describe('normalizeEffortLevel', () => {

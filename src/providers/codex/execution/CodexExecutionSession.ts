@@ -42,7 +42,7 @@ import {
 } from '../history/CodexHistoryStore';
 import { getCodexModelOptions } from '../modelOptions';
 import {
-  findCodexModel,
+  findCodexModelCapability,
   resolveCodexModelServiceTier,
   resolveCodexReasoningEffort,
 } from '../models';
@@ -1773,7 +1773,7 @@ export class CodexExecutionSession
     model: string,
   ): string {
     const codexSettings = getCodexProviderSettings(settings);
-    const modelMetadata = findCodexModel(codexSettings.discoveredModels, model);
+    const modelMetadata = findCodexModelCapability(codexSettings.discoveredModels, model);
     const effort = resolveCodexReasoningEffort(
       modelMetadata,
       codexSettings.enableUltraEffort,
@@ -2136,7 +2136,7 @@ function resolveCodexServiceTier(
   modelId: string,
   settings: Record<string, unknown>,
 ): string | null {
-  const model = findCodexModel(
+  const model = findCodexModelCapability(
     getCodexProviderSettings(settings).discoveredModels,
     modelId,
   );

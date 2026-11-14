@@ -103,6 +103,33 @@ describe('getBlankTabModelOptions', () => {
     ]);
   });
 
+  it('deduplicates a native GPT-6.1 Terra entry against the Claude gateway id', () => {
+    (ProviderRegistry.getEnabledProviderIds as jest.Mock).mockReturnValue(['claude', 'codex']);
+    (ProviderRegistry.getChatUIConfig as jest.Mock).mockImplementation((providerId: string) => (
+      providerId === 'codex'
+        ? {
+          getModelOptions: () => [
+            { value: 'gpt-6.1-terra', label: 'GPT-6.1 Terra' },
+            { value: 'gpt-6-astra', label: 'GPT-6 Astra' },
+          ],
+          getProviderIcon: () => CODEX_ICON,
+        }
+        : {
+          getModelOptions: () => [
+            { value: 'claude-code/openai/gpt-6.1-terra', label: 'Gateway Terra' },
+            { value: 'claude-code/openai/gpt-6-cyber', label: 'Gateway Cyber' },
+          ],
+          getProviderIcon: () => CLAUDE_ICON,
+        }
+    ));
+
+    expect(getBlankTabModelOptions({}).map(option => option.value)).toEqual([
+      'claude-code/openai/gpt-6-cyber',
+      'gpt-6.1-terra',
+      'gpt-6-astra',
+    ]);
+  });
+
   it('keeps the Claude gateway GPT visible when native Codex is not enabled', () => {
     (ProviderRegistry.getEnabledProviderIds as jest.Mock).mockReturnValue(['claude']);
     (ProviderRegistry.getChatUIConfig as jest.Mock).mockReturnValue({
