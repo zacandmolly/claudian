@@ -1,4 +1,4 @@
-import { createMockEl } from '@test/helpers/mockElement';
+import { createMockEl } from '@test/helpers/MockElement';
 
 import { SelectionController } from '@/features/chat/controllers/SelectionController';
 import { hideSelectionHighlight, showSelectionHighlight } from '@/shared/components/SelectionHighlight';
@@ -39,13 +39,6 @@ function createMockDOMSelection(text: string, anchorNode: any, focusNode?: any, 
   };
 }
 
-function createMockIndicator() {
-  const indicator = createMockEl();
-  indicator.addClass('claudian-selection-indicator');
-  indicator.addClass('claudian-hidden');
-  return indicator;
-}
-
 function createMockEventTarget() {
   const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
   const containedNodes = new Set<unknown>();
@@ -59,8 +52,8 @@ function createMockEventTarget() {
     removeEventListener: jest.fn((event: string, listener: (...args: unknown[]) => void) => {
       listeners.get(event)?.delete(listener);
     }),
-    trigger: (event: string) => {
-      listeners.get(event)?.forEach(handler => handler());
+    trigger: (event: string, eventData: unknown = {}) => {
+      listeners.get(event)?.forEach(handler => handler(eventData));
     },
     contains: jest.fn((node: unknown) => node === el || containedNodes.has(node)),
     addContainedNode: (node: unknown) => {
@@ -70,30 +63,19 @@ function createMockEventTarget() {
   return el;
 }
 
-function createMockContextRow() {
-  const elements: Record<string, any> = {
-    '.claudian-selection-indicator': createMockIndicator(),
-    '.claudian-canvas-indicator': createMockEl(),
-    '.claudian-file-indicator': null,
-    '.claudian-image-preview': null,
+function createMockContextTray() {
+  return {
+    setItems: jest.fn(),
+    clearItems: jest.fn(),
   };
-  elements['.claudian-canvas-indicator'].addClass('claudian-canvas-indicator');
-  elements['.claudian-canvas-indicator'].addClass('claudian-hidden');
-  const contextRow = createMockEl();
-  const toggle = contextRow.classList.toggle;
-  contextRow.classList.toggle = jest.fn((cls: string, force?: boolean) => toggle(cls, force));
-
-  contextRow.querySelector = jest.fn((selector: string) => elements[selector] ?? null);
-  return contextRow as any;
 }
 
 describe('SelectionController', () => {
   let controller: SelectionController;
   let app: any;
-  let indicatorEl: any;
+  let contextTray: ReturnType<typeof createMockContextTray>;
   let inputEl: any;
   let focusScopeEl: any;
-  let contextRowEl: any;
   let editor: any;
   let editorView: any;
   let originalDocument: any;
@@ -107,11 +89,10 @@ describe('SelectionController', () => {
     (showSelectionHighlight as jest.Mock).mockClear();
     (hideSelectionHighlight as jest.Mock).mockClear();
 
-    indicatorEl = createMockIndicator();
+    contextTray = createMockContextTray();
     inputEl = createMockEventTarget();
     focusScopeEl = createMockEventTarget();
     focusScopeEl.addContainedNode(inputEl);
-    contextRowEl = createMockContextRow();
 
     editorView = {
       id: 'editor-view',
@@ -136,7 +117,7 @@ describe('SelectionController', () => {
       },
     };
 
-    controller = new SelectionController(app, indicatorEl, inputEl, contextRowEl, undefined, focusScopeEl);
+    controller = new SelectionController(app, contextTray as any, inputEl, undefined, focusScopeEl);
 
     originalDocument = (global as any).document;
     (global as any).document = { activeElement: null };
@@ -162,8 +143,10 @@ describe('SelectionController', () => {
       lineCount: 1,
       startLine: 1,
     });
-    expect(indicatorEl.textContent).toBe('1 line selected');
-    expect(indicatorEl.style.display).toBe('block');
+    expect(contextTray.setItems).toHaveBeenLastCalledWith('editor-selection', [
+      expect.objectContaining({ label: '1 line selected' }),
+    ]);
+    expect(contextTray.setItems.mock.calls[0][1][0]).not.toHaveProperty('title');
 
     controller.showHighlight();
     expect(showSelectionHighlight).toHaveBeenCalledWith(editorView, 0, 4);
@@ -178,8 +161,19 @@ describe('SelectionController', () => {
     jest.advanceTimersByTime(250);
 
     expect(controller.hasSelection()).toBe(false);
-    expect(indicatorEl.style.display).toBe('none');
+    expect(contextTray.clearItems).toHaveBeenCalledWith('editor-selection');
     expect(hideSelectionHighlight).toHaveBeenCalledWith(editorView);
+  });
+
+  it('clears a sticky selection from the tray remove action', () => {
+    controller.start();
+    jest.advanceTimersByTime(250);
+
+    const items = contextTray.setItems.mock.calls[0][1];
+    items[0].onRemove();
+
+    expect(controller.hasSelection()).toBe(false);
+    expect(contextTray.clearItems).toHaveBeenCalledWith('editor-selection');
   });
 
   it('preserves selection when focus moves into the chat sidebar', () => {
@@ -194,7 +188,144 @@ describe('SelectionController', () => {
     jest.advanceTimersByTime(250);
 
     expect(controller.hasSelection()).toBe(true);
-    expect(indicatorEl.style.display).toBe('block');
+    expect(contextTray.clearItems).not.toHaveBeenCalledWith('editor-selection');
+  });
+
+  it('preserves selection when the owning chat view is active in a detached window', () => {
+    const owningLeaf = {};
+    app.workspace.getMostRecentLeaf = jest.fn().mockReturnValue(owningLeaf);
+    controller = new SelectionController(
+      app,
+      contextTray as any,
+      inputEl,
+      undefined,
+      focusScopeEl,
+      undefined,
+      owningLeaf as any,
+    );
+    controller.start();
+    jest.advanceTimersByTime(250);
+    expect(controller.hasSelection()).toBe(true);
+
+    app.workspace.getActiveViewOfType.mockReturnValue(null);
+    (global as any).document.activeElement = null;
+    jest.advanceTimersByTime(250);
+
+    expect(app.workspace.getMostRecentLeaf).toHaveBeenCalled();
+    expect(controller.hasSelection()).toBe(true);
+    expect(contextTray.clearItems).not.toHaveBeenCalledWith('editor-selection');
+  });
+
+  it('clears selection when a different chat leaf is active', () => {
+    const owningLeaf = {};
+    app.workspace.getMostRecentLeaf = jest.fn().mockReturnValue({});
+    controller = new SelectionController(
+      app,
+      contextTray as any,
+      inputEl,
+      undefined,
+      focusScopeEl,
+      undefined,
+      owningLeaf as any,
+    );
+    controller.start();
+    jest.advanceTimersByTime(250);
+    expect(controller.hasSelection()).toBe(true);
+
+    app.workspace.getActiveViewOfType.mockReturnValue(null);
+    (global as any).document.activeElement = null;
+    jest.advanceTimersByTime(250);
+
+    expect(controller.hasSelection()).toBe(false);
+    expect(contextTray.clearItems).toHaveBeenCalledWith('editor-selection');
+  });
+
+  it('preserves selection when a relocated composer outside tab content has focus', () => {
+    const contentScopeEl = createMockEventTarget();
+    const composerScopeEl = createMockEventTarget();
+    composerScopeEl.addContainedNode(inputEl);
+    controller = new SelectionController(
+      app,
+      contextTray as any,
+      inputEl,
+      undefined,
+      [contentScopeEl, composerScopeEl],
+    );
+
+    controller.start();
+    jest.advanceTimersByTime(250);
+    expect(controller.hasSelection()).toBe(true);
+
+    app.workspace.getActiveViewOfType.mockReturnValue(null);
+    (global as any).document.activeElement = inputEl;
+    jest.advanceTimersByTime(250);
+
+    expect(controller.hasSelection()).toBe(true);
+    expect(contextTray.clearItems).not.toHaveBeenCalledWith('editor-selection');
+  });
+
+  it('preserves selection when shared footer controls have focus', () => {
+    const contentScopeEl = createMockEventTarget();
+    const composerScopeEl = createMockEventTarget();
+    const footerScopeEl = createMockEventTarget();
+    const historyButton = {};
+    footerScopeEl.addContainedNode(historyButton);
+    controller = new SelectionController(
+      app,
+      contextTray as any,
+      inputEl,
+      undefined,
+      [contentScopeEl, composerScopeEl, footerScopeEl],
+    );
+
+    controller.start();
+    jest.advanceTimersByTime(250);
+    expect(controller.hasSelection()).toBe(true);
+
+    app.workspace.getActiveViewOfType.mockReturnValue(null);
+    (global as any).document.activeElement = historyButton;
+    jest.advanceTimersByTime(250);
+
+    expect(controller.hasSelection()).toBe(true);
+    expect(contextTray.clearItems).not.toHaveBeenCalledWith('editor-selection');
+  });
+
+  it('shows selection highlight when focus enters shared footer controls', () => {
+    const footerScopeEl = createMockEventTarget();
+    controller = new SelectionController(
+      app,
+      contextTray as any,
+      inputEl,
+      undefined,
+      [focusScopeEl, footerScopeEl],
+    );
+    controller.start();
+    jest.advanceTimersByTime(250);
+    (showSelectionHighlight as jest.Mock).mockClear();
+
+    footerScopeEl.trigger('focusin', { relatedTarget: null });
+
+    expect(showSelectionHighlight).toHaveBeenCalledWith(editorView, 0, 4);
+  });
+
+  it('does not re-show selection highlight when focus moves inside chat focus scopes', () => {
+    const footerScopeEl = createMockEventTarget();
+    const footerButton = {};
+    footerScopeEl.addContainedNode(footerButton);
+    controller = new SelectionController(
+      app,
+      contextTray as any,
+      inputEl,
+      undefined,
+      [focusScopeEl, footerScopeEl],
+    );
+    controller.start();
+    jest.advanceTimersByTime(250);
+    (showSelectionHighlight as jest.Mock).mockClear();
+
+    focusScopeEl.trigger('focusin', { relatedTarget: footerButton });
+
+    expect(showSelectionHighlight).not.toHaveBeenCalled();
   });
 
   it('shows fake highlight when focus moves to another sidebar control in edit mode', () => {
@@ -222,7 +353,7 @@ describe('SelectionController', () => {
     jest.advanceTimersByTime(250);
 
     expect(controller.hasSelection()).toBe(false);
-    expect(indicatorEl.style.display).toBe('none');
+    expect(contextTray.clearItems).toHaveBeenCalledWith('editor-selection');
     expect(hideSelectionHighlight).toHaveBeenCalledWith(editorView);
   });
 
@@ -296,8 +427,9 @@ describe('SelectionController', () => {
         selectedText: 'reading selection',
         lineCount: 1,
       });
-      expect(indicatorEl.textContent).toBe('1 line selected');
-      expect(indicatorEl.style.display).toBe('block');
+      expect(contextTray.setItems).toHaveBeenLastCalledWith('editor-selection', [
+        expect.objectContaining({ label: '1 line selected' }),
+      ]);
     });
 
     it('preserves raw reading mode text and omits line metadata', () => {
@@ -318,7 +450,9 @@ describe('SelectionController', () => {
         selectedText: '  reading selection\nsecond line  ',
         lineCount: 2,
       });
-      expect(indicatorEl.textContent).toBe('2 lines selected');
+      expect(contextTray.setItems).toHaveBeenLastCalledWith('editor-selection', [
+        expect.objectContaining({ label: '2 lines selected' }),
+      ]);
     });
 
     it('prefers native DOM selection in reading mode, falls back to CSS Highlight API when lost', () => {
@@ -397,7 +531,7 @@ describe('SelectionController', () => {
       jest.advanceTimersByTime(250);
 
       expect(controller.hasSelection()).toBe(false);
-      expect(indicatorEl.style.display).toBe('none');
+      expect(contextTray.clearItems).toHaveBeenCalledWith('editor-selection');
     });
 
     it('preserves reading mode selection when input is focused', () => {
@@ -442,7 +576,7 @@ describe('SelectionController', () => {
       jest.advanceTimersByTime(250);
 
       expect(controller.hasSelection()).toBe(true);
-      expect(indicatorEl.style.display).toBe('block');
+      expect(contextTray.clearItems).not.toHaveBeenCalledWith('editor-selection');
     });
 
     it('clears CSS highlight when reading mode selection is deselected', () => {
@@ -588,16 +722,4 @@ describe('SelectionController', () => {
     });
   });
 
-  it('keeps context row visible when canvas selection indicator is visible', () => {
-    const canvasIndicator = createMockEl();
-    canvasIndicator.addClass('claudian-canvas-indicator');
-    contextRowEl.querySelector.mockImplementation((selector: string) => {
-      if (selector === '.claudian-canvas-indicator') return canvasIndicator;
-      return null;
-    });
-
-    controller.updateContextRowVisibility();
-
-    expect(contextRowEl.classList.toggle).toHaveBeenCalledWith('has-content', true);
-  });
 });

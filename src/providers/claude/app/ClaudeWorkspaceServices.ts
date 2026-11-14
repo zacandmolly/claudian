@@ -1,21 +1,25 @@
-import { McpServerManager } from '../../../core/mcp/McpServerManager';
 import type { ProviderCommandCatalog } from '../../../core/providers/commands/ProviderCommandCatalog';
+import type { ProviderVaultEntryRepository } from '../../../core/providers/commands/ProviderVaultEntryRepository';
+import type { ProviderHost } from '../../../core/providers/ProviderHost';
 import { ProviderWorkspaceRegistry } from '../../../core/providers/ProviderWorkspaceRegistry';
 import type {
   AppAgentManager,
   AppAgentStorage,
-  AppMcpStorage,
   AppPluginManager,
   ProviderCliResolver,
   ProviderWorkspaceRegistration,
   ProviderWorkspaceServices,
 } from '../../../core/providers/types';
 import type { VaultFileAdapter } from '../../../core/storage/VaultFileAdapter';
-import type ClaudianPlugin from '../../../main';
+import { parseEnvironmentVariables } from '../../../utils/env';
 import { getVaultPath } from '../../../utils/path';
 import { AgentManager } from '../agents/AgentManager';
-import { ClaudeCommandCatalog } from '../commands/ClaudeCommandCatalog';
+import {
+  ClaudeCommandCatalog,
+  type CommandProbe,
+} from '../commands/ClaudeCommandCatalog';
 import { probeRuntimeCommands } from '../commands/probeRuntimeCommands';
+import { resolveClaudeConfigDir } from '../config/ClaudeConfigDir';
 import { PluginManager } from '../plugins/PluginManager';
 import { ClaudeCliResolver } from '../runtime/ClaudeCliResolver';
 import { StorageService } from '../storage/StorageService';
@@ -24,55 +28,81 @@ import { claudeSettingsTabRenderer } from '../ui/ClaudeSettingsTab';
 export interface ClaudeWorkspaceServices extends ProviderWorkspaceServices {
   claudeStorage: StorageService;
   cliResolver: ProviderCliResolver;
-  mcpStorage: AppMcpStorage;
-  mcpManager: McpServerManager;
   pluginManager: AppPluginManager;
   agentStorage: AppAgentStorage;
   agentManager: AppAgentManager;
   commandCatalog: ProviderCommandCatalog;
+  vaultCommandRepository: ProviderVaultEntryRepository;
   agentMentionProvider: AppAgentManager;
+  dispose(): Promise<void>;
+}
+
+export interface ClaudeWorkspaceServicesOptions {
+  readonly commandProbe?: CommandProbe;
 }
 
 export async function createClaudeWorkspaceServices(
-  plugin: ClaudianPlugin,
+  plugin: ProviderHost,
   adapter: VaultFileAdapter,
+  options: ClaudeWorkspaceServicesOptions = {},
 ): Promise<ClaudeWorkspaceServices> {
   const claudeStorage = new StorageService(plugin, adapter);
-  await claudeStorage.ensureDirectories();
 
   const cliResolver = new ClaudeCliResolver();
-  const mcpStorage = claudeStorage.mcp;
-  const mcpManager = new McpServerManager(mcpStorage);
-  await mcpManager.loadServers();
 
   const vaultPath = getVaultPath(plugin.app) ?? '';
-  const pluginManager = new PluginManager(vaultPath, claudeStorage.ccSettings);
-  await pluginManager.loadPlugins();
+  const getClaudeConfigDir = () => resolveClaudeConfigDir({
+    environment: {
+      ...process.env,
+      ...parseEnvironmentVariables(plugin.getActiveEnvironmentVariables('claude')),
+    },
+    hostPlatform: process.platform,
+    vaultPath,
+  });
+  const pluginManager = new PluginManager(
+    vaultPath,
+    claudeStorage.ccSettings,
+    getClaudeConfigDir,
+  );
 
   const agentStorage = claudeStorage.agents;
-  const agentManager = new AgentManager(vaultPath, pluginManager);
-  await agentManager.loadAgents();
+  const agentManager = new AgentManager(vaultPath, pluginManager, getClaudeConfigDir);
 
   const commandCatalog = new ClaudeCommandCatalog(
     claudeStorage.commands,
     claudeStorage.skills,
-    () => probeRuntimeCommands(plugin),
+    options.commandProbe ?? (signal => probeRuntimeCommands(plugin, signal)),
   );
+  const unregisterTransitionHook = plugin.executionLifecycleRegistry
+    .registerTransitionHook('claude', {
+      beforeTransition: () => commandCatalog.beginEnvironmentTransition(),
+      afterTransition: () => commandCatalog.endEnvironmentTransition(),
+    });
+  let disposePromise: Promise<void> | null = null;
 
   return {
     claudeStorage,
     cliResolver,
-    mcpStorage,
-    mcpServerManager: mcpManager,
-    mcpManager,
     pluginManager,
     agentStorage,
     agentManager,
     commandCatalog,
+    vaultCommandRepository: commandCatalog,
     agentMentionProvider: agentManager,
     settingsTabRenderer: claudeSettingsTabRenderer,
     refreshAgentMentions: async () => {
+      await pluginManager.loadPlugins();
       await agentManager.loadAgents();
+    },
+    prepareSettings: async () => {
+      await pluginManager.loadPlugins();
+      await agentManager.loadAgents();
+    },
+    dispose() {
+      if (disposePromise) return disposePromise;
+      unregisterTransitionHook();
+      disposePromise = commandCatalog.dispose();
+      return disposePromise;
     },
   };
 }

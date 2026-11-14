@@ -83,6 +83,33 @@ describe('PiSubprocess', () => {
     );
   });
 
+  it('preserves Unicode Windows session paths when resuming through a .cmd shim', () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    const sessionFile = 'D:\\文档\\Documents\\Atlas\\Pi Sessions\\session.jsonl';
+    const subprocess = new PiSubprocess({
+      args: ['--mode', 'rpc', '--session', sessionFile],
+      command: 'C:\\Users\\dev\\AppData\\Roaming\\npm\\pi.cmd',
+      cwd: 'D:\\文档\\Documents\\Atlas',
+      env: { PATH: 'C:\\Windows\\System32' },
+    });
+
+    subprocess.start();
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      process.env.ComSpec || process.env.comspec || 'cmd.exe',
+      [
+        '/d',
+        '/s',
+        '/c',
+        '"C:\\Users\\dev\\AppData\\Roaming\\npm\\pi.cmd --mode rpc --session "D:\\文档\\Documents\\Atlas\\Pi Sessions\\session.jsonl""',
+      ],
+      expect.objectContaining({
+        cwd: 'D:\\文档\\Documents\\Atlas',
+        windowsVerbatimArguments: true,
+      }),
+    );
+  });
+
   it('kills the process tree when shutting down Windows .cmd shims', async () => {
     Object.defineProperty(process, 'platform', { value: 'win32' });
     const subprocess = new PiSubprocess({
@@ -147,5 +174,40 @@ describe('PiSubprocess', () => {
     await shutdown;
 
     expect(onClose).toHaveBeenCalledWith(expect.any(Error));
+  });
+
+  it('settles after a final deadline when no exit follows SIGKILL', async () => {
+    jest.useFakeTimers();
+    const subprocess = new PiSubprocess({
+      args: ['--mode', 'rpc'],
+      command: 'pi',
+      cwd: '/vault',
+      env: {},
+    });
+    subprocess.start();
+
+    const shutdown = subprocess.shutdown();
+    jest.advanceTimersByTime(6_000);
+
+    await expect(shutdown).resolves.toBeUndefined();
+    expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it('shares one shutdown sequence across repeated calls', async () => {
+    const subprocess = new PiSubprocess({
+      args: ['--mode', 'rpc'],
+      command: 'pi',
+      cwd: '/vault',
+      env: {},
+    });
+    subprocess.start();
+
+    const first = subprocess.shutdown();
+    const second = subprocess.shutdown();
+    expect(proc.kill).toHaveBeenCalledTimes(1);
+
+    proc.exitCode = 0;
+    proc.emit('exit', 0, 'SIGTERM');
+    await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
   });
 });

@@ -53,9 +53,6 @@ export interface KeyboardNavigationSettings {
   focusInputKey: string;       // Key to focus input (default: 'i', like vim insert mode)
 }
 
-/** Tab bar position setting. */
-export type TabBarPosition = 'input' | 'header';
-
 export const CHAT_VIEW_PLACEMENTS = [
   'right-sidebar',
   'left-sidebar',
@@ -65,13 +62,42 @@ export const CHAT_VIEW_PLACEMENTS = [
 /** Workspace location used when opening the Claudian chat view. */
 export type ChatViewPlacement = typeof CHAT_VIEW_PLACEMENTS[number];
 
-/** Result from instruction refinement agent query. */
-export interface InstructionRefineResult {
+export const DUAL_PANE_SIDES = ['left', 'right'] as const;
+
+/** Side of the chat occupied by the session manager in dual-pane mode. */
+export type DualPaneSide = typeof DUAL_PANE_SIDES[number];
+
+export type SessionManagerOrganization = 'list' | 'linked-content';
+export type SessionManagerSort = 'last-updated' | 'created';
+
+export interface LegacyLinkedContentSettingsInput {
+  sessionManagerOrganization?: SessionManagerOrganization | 'linked-note';
+  pinnedLinkedNotePaths?: unknown;
+}
+
+/** Forced provider transition invalidated a parked auxiliary continuation. */
+export interface AuxiliaryContinuityReset {
+  success: false;
+  resetRequired: true;
+  error: string;
+  refinedInstruction?: never;
+  editedText?: never;
+  insertedText?: never;
+  clarification?: never;
+}
+
+/** Ordinary result from an instruction refinement agent query. */
+export interface InstructionRefineOutcome {
   success: boolean;
+  resetRequired?: false;
   refinedInstruction?: string;  // The refined instruction text
   clarification?: string;       // Agent's clarifying question (if any)
   error?: string;               // Error message (if failed)
 }
+
+export type InstructionRefineResult =
+  | InstructionRefineOutcome
+  | AuxiliaryContinuityReset;
 
 /** Permission mode for tool execution. */
 export type PermissionMode = 'yolo' | 'plan' | 'normal';
@@ -84,6 +110,12 @@ export type HostnameCliPaths = Record<string, string>;
 
 /** Opaque provider-owned settings bags keyed by provider id. */
 export type ProviderConfigMap = Partial<Record<string, Record<string, unknown>>>;
+
+/** Provider-qualified model explicitly selected in chat and used to seed future tabs. */
+export interface StoredChatModelSelection {
+  providerId: string;
+  model: string;
+}
 
 /**
  * Application settings stored in .claudian/claudian-settings.json.
@@ -105,6 +137,7 @@ export interface ClaudianSettings {
   effortLevel: string;
   serviceTier: string;
   enableAutoTitleGeneration: boolean;
+  titleGenerationLocale: string;
   titleGenerationModel: string;
 
   // Content settings
@@ -131,21 +164,34 @@ export interface ClaudianSettings {
 
   // Provider selection
   settingsProvider: string;  // ProviderId — which provider's model/effort/budget is projected to top-level fields
+  lastSelectedChatModel: StoredChatModelSelection | null;
   savedProviderModel: Partial<Record<string, string>>;
   savedProviderEffort: Partial<Record<string, string>>;
   savedProviderServiceTier: Partial<Record<string, string>>;
   savedProviderThinkingBudget: Partial<Record<string, string>>;
   savedProviderPermissionMode: Partial<Record<string, string>>;
 
+  // Internal lifecycle state. Entries remain until all affected session metadata is durable.
+  pendingProviderSessionInvalidations: Partial<Record<string, number>>;
+
   // State (provider-specific, round-tripped opaquely)
   lastCustomModel?: string;
 
   // UI preferences
-  maxTabs: number;
-  tabBarPosition: TabBarPosition;
+  maxWarmAgentProcesses: number;
   enableAutoScroll: boolean;
   deferMathRenderingDuringStreaming: boolean;
+  expandFileEditsByDefault: boolean;
   chatViewPlacement: ChatViewPlacement;
+  enableDualPane: boolean;
+  dualPaneSide: DualPaneSide;
+  restoreTabsOnStartup: boolean;
+  collabEnabled: boolean;
+  collabProjectsFolder: string;
+  collabGitPath: string;
+  sessionManagerOrganization?: SessionManagerOrganization;
+  sessionManagerSort?: SessionManagerSort;
+  pinnedLinkedContentPaths?: string[];
 
   // Provider command visibility
   hiddenProviderCommands: HiddenProviderCommands;

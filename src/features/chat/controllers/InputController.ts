@@ -5,7 +5,9 @@ import {
   detectBuiltInCommand,
   isBuiltInCommandSupported,
 } from '../../../core/commands/builtInCommands';
+import type { ProviderExecutionEvent } from '../../../core/execution';
 import { ProviderRegistry } from '../../../core/providers/ProviderRegistry';
+import { ProviderSettingsCoordinator } from '../../../core/providers/ProviderSettingsCoordinator';
 import {
   DEFAULT_CHAT_PROVIDER_ID,
   type InstructionRefineService,
@@ -13,28 +15,35 @@ import {
   type ProviderId,
   type TitleGenerationService,
 } from '../../../core/providers/types';
-import type { ChatRuntime } from '../../../core/runtime/ChatRuntime';
-import {
-  cloneChatTurnRequest,
-  mergeQueuedChatTurns,
-  type QueuedChatTurn,
-} from '../../../core/runtime/QueuedTurn';
-import type {
-  ApprovalCallbackOptions,
-  ApprovalDecisionOption,
-  ChatTurnRequest,
-} from '../../../core/runtime/types';
 import { TOOL_EXIT_PLAN_MODE } from '../../../core/tools/toolNames';
-import type { ApprovalDecision, ChatMessage, ExitPlanModeDecision, StreamChunk } from '../../../core/types';
-import type ClaudianPlugin from '../../../main';
+import {
+  type ApprovalDecision,
+  type ChatMessage,
+  type ExitPlanModeDecision,
+  type ExitPlanModePresentationOptions,
+  isCanonicalUserMessage,
+  type StreamChunk,
+} from '../../../core/types';
+import { t } from '../../../i18n/i18n';
 import { ResumeSessionDropdown } from '../../../shared/components/ResumeSessionDropdown';
 import { InstructionModal } from '../../../shared/modals/InstructionConfirmModal';
 import type { BrowserSelectionContext } from '../../../utils/browser';
 import type { CanvasSelectionContext } from '../../../utils/canvas';
+import { extractUserDisplayContent } from '../../../utils/context';
 import { formatDurationMmSs } from '../../../utils/date';
 import type { EditorSelectionContext } from '../../../utils/editor';
 import { appendMarkdownSnippet } from '../../../utils/markdown';
+import type { FeatureHost } from '../../FeatureHost';
 import { COMPLETION_FLAVOR_WORDS } from '../constants';
+import {
+  type ChatExecutionCoordinator,
+  ChatExecutionPreHandoffError,
+  type ChatTurnSubmission,
+} from '../execution/ChatExecutionCoordinator';
+import type {
+  LinkedContentController,
+  LinkedContentSubmissionToken,
+} from '../linked-content';
 import { type InlineAskQuestionConfig, InlineAskUserQuestion } from '../rendering/InlineAskUserQuestion';
 import { InlineExitPlanMode } from '../rendering/InlineExitPlanMode';
 import { InlinePlanApproval,type PlanApprovalDecision } from '../rendering/InlinePlanApproval';
@@ -42,23 +51,43 @@ import type { MessageRenderer } from '../rendering/MessageRenderer';
 import { setToolIcon, updateToolCallResult } from '../rendering/ToolCallRenderer';
 import type { SubagentManager } from '../services/SubagentManager';
 import type { ChatState } from '../state/ChatState';
-import type { QueuedMessage } from '../state/types';
+import type { ChatTurnRequest, QueuedMessage, TabReviewOutcome } from '../state/types';
 import type { FileContextManager } from '../ui/FileContext';
 import type { ImageContextManager } from '../ui/ImageContext';
-import type { AddExternalContextResult, McpServerSelector } from '../ui/InputToolbar';
+import type { AddExternalContextResult } from '../ui/InputToolbar';
 import type { InstructionModeManager } from '../ui/InstructionModeManager';
 import type { StatusPanel } from '../ui/StatusPanel';
 import type { BrowserSelectionController } from './BrowserSelectionController';
 import type { CanvasSelectionController } from './CanvasSelectionController';
 import type { ConversationController } from './ConversationController';
 import type { SelectionController } from './SelectionController';
-import type { StreamController } from './StreamController';
+import {
+  providerOutputEventToStreamChunk,
+  type StreamController,
+} from './StreamController';
+import type { ActiveTurnOwner } from './TurnCoordinator';
+import { TurnCoordinator } from './TurnCoordinator';
 
 const APPROVAL_OPTION_MAP: Record<string, ApprovalDecision> = {
   'Deny': 'deny',
   'Allow once': 'allow',
   'Always allow': 'allow-always',
 };
+
+interface ApprovalDecisionOption {
+  label: string;
+  description?: string;
+  value: string;
+  decision?: ApprovalDecision;
+}
+
+interface ApprovalCallbackOptions {
+  decisionReason?: string;
+  blockedPath?: string;
+  agentID?: string;
+  decisionOptions?: ApprovalDecisionOption[];
+  additionalPermissions?: unknown;
+}
 
 const DEFAULT_APPROVAL_DECISION_OPTIONS: ApprovalDecisionOption[] =
   Object.entries(APPROVAL_OPTION_MAP).map(([label, decision]) => ({
@@ -72,7 +101,7 @@ function toError(error: unknown): Error {
 }
 
 export interface InputControllerDeps {
-  plugin: ClaudianPlugin;
+  plugin: FeatureHost;
   state: ChatState;
   renderer: MessageRenderer;
   streamController: StreamController;
@@ -84,8 +113,8 @@ export interface InputControllerDeps {
   getWelcomeEl: () => HTMLElement | null;
   getMessagesEl: () => HTMLElement;
   getFileContextManager: () => FileContextManager | null;
+  getLinkedContentController: () => LinkedContentController;
   getImageContextManager: () => ImageContextManager | null;
-  getMcpServerSelector: () => McpServerSelector | null;
   getExternalContextSelector: () => {
     getExternalContexts: () => string[];
     addExternalContext: (path: string) => AddExternalContextResult;
@@ -98,15 +127,59 @@ export interface InputControllerDeps {
   generateId: () => string;
   resetInputHeight: () => void;
   getAuxiliaryModel?: () => string | null;
-  getAgentService?: () => ChatRuntime | null;
+  getExecutionCoordinator: () => ChatExecutionCoordinator | null;
   getSubagentManager: () => SubagentManager;
-  /** Tab-level provider fallback for blank tabs (derived from draft model). */
+  /** Authoritative tab/conversation provider, independent of runtime lifecycle. */
   getTabProviderId?: () => ProviderId;
   /** Returns true if ready. */
-  ensureServiceInitialized?: () => Promise<boolean>;
+  ensureExecutionInitialized?: () => Promise<boolean>;
   openConversation?: (conversationId: string) => Promise<void>;
+  /** Lets the active layout replace in-place clear with its own New action. */
+  handleNewConversationCommand?: () => Promise<boolean>;
+  /** Lets the active layout start approved plan content in a separate conversation. */
+  handleNewSessionPlan?: (planContent: string) => Promise<boolean>;
   onForkAll?: () => Promise<void>;
-  restorePrePlanPermissionModeIfNeeded?: () => void;
+  /** Toggles the active provider's fast service tier when available. */
+  toggleFastMode?: () => Promise<boolean>;
+  restorePrePlanPermissionModeIfNeeded?: () => void | Promise<void>;
+  /** Captures a review reporter when a terminal provider turn becomes visible. */
+  captureReviewableSettlement?: (outcome: TabReviewOutcome) => () => void;
+  canStartTurn?: () => boolean;
+  turnOwner?: ActiveTurnOwner;
+}
+
+export interface SendMessageOptions {
+  editorContextOverride?: EditorSelectionContext | null;
+  browserContextOverride?: BrowserSelectionContext | null;
+  canvasContextOverride?: CanvasSelectionContext | null;
+  content?: string;
+  images?: ChatMessage['images'];
+  turnRequestOverride?: ChatTurnRequest;
+}
+
+interface PendingProviderUserMessage {
+  displayContent: string;
+  persistedContent?: string;
+  linkedContentPath?: string;
+  images?: ChatMessage['images'];
+}
+
+type PendingSteerProviderDisposition =
+  | 'awaiting-result'
+  | 'definitely-unsent'
+  | 'accepted-awaiting-correlation'
+  | 'ambiguous-awaiting-reconciliation';
+
+interface PendingSteerState {
+  readonly conversationId: string;
+  readonly coordinator: ChatExecutionCoordinator;
+  readonly inputRecordId: string;
+  readonly message: QueuedMessage;
+  readonly expectedProviderMessage: PendingProviderUserMessage;
+  providerDisposition: PendingSteerProviderDisposition;
+  uiState: 'visible' | 'cleared';
+  correlationState: 'pending' | 'settled' | 'delegated-to-history';
+  retryState: 'blocked' | 'parked' | 'restored';
 }
 
 export class InputController {
@@ -118,30 +191,31 @@ export class InputController {
   private pendingPlanApprovalInvalidated = false;
   private activeResumeDropdown: ResumeSessionDropdown | null = null;
   private inputContainerHideDepth = 0;
-  private steerInFlight = false;
-  private pendingSteerMessage: QueuedMessage | null = null;
+  private readonly pendingSteersByConversation = new Map<string, PendingSteerState>();
   private activeStreamingAssistantMessage: ChatMessage | null = null;
-  private pendingProviderUserMessages: Array<{
-    displayContent: string;
-    persistedContent?: string;
-    currentNote?: string;
-    images?: ChatMessage['images'];
-  }> = [];
+  private pendingProviderUserMessages: PendingProviderUserMessage[] = [];
   private sawInitialProviderUserMessage = false;
   private awaitingProviderAssistantStart = false;
+  private deferredReviewableSettlement: {
+    conversationId: string | null;
+    report: () => void;
+  } | null = null;
+  private readonly turnCoordinator: TurnCoordinator<SendMessageOptions>;
 
   constructor(deps: InputControllerDeps) {
     this.deps = deps;
+    this.turnCoordinator = new TurnCoordinator(
+      (options) => this.executeSendMessage(options),
+      deps.turnOwner,
+    );
   }
 
-  private getAgentService(): ChatRuntime | null {
-    return this.deps.getAgentService?.() ?? null;
+  private getExecutionCoordinator(): ChatExecutionCoordinator | null {
+    return this.deps.getExecutionCoordinator();
   }
 
   private getAuxiliaryModel(): string | null {
-    return this.deps.getAuxiliaryModel?.()
-      ?? this.getAgentService()?.getAuxiliaryModel?.()
-      ?? null;
+    return this.deps.getAuxiliaryModel?.() ?? null;
   }
 
   private syncInstructionRefineModelOverride(
@@ -151,14 +225,14 @@ export class InputController {
   }
 
   private getActiveProviderId(): ProviderId {
-    const agentService = this.getAgentService();
-    const conversationId = this.deps.state.currentConversationId;
-    if (!conversationId) {
-      return this.deps.getTabProviderId?.() ?? agentService?.providerId ?? DEFAULT_CHAT_PROVIDER_ID;
+    const tabProviderId = this.deps.getTabProviderId?.();
+    if (tabProviderId) {
+      return tabProviderId;
     }
 
-    if (agentService?.providerId) {
-      return agentService.providerId;
+    const conversationId = this.deps.state.currentConversationId;
+    if (!conversationId) {
+      return DEFAULT_CHAT_PROVIDER_ID;
     }
 
     return this.deps.plugin.getConversationSync(conversationId)?.providerId ?? DEFAULT_CHAT_PROVIDER_ID;
@@ -166,36 +240,60 @@ export class InputController {
 
   private getActiveCapabilities(): ProviderCapabilities {
     const providerId = this.getActiveProviderId();
-    const agentService = this.getAgentService();
-    if (agentService?.providerId === providerId) {
-      return agentService.getCapabilities();
-    }
-
     return ProviderRegistry.getCapabilities(providerId);
   }
 
-  private isResumeSessionAtStillNeeded(resumeUuid: string, previousMessages: ChatMessage[]): boolean {
-    for (let i = previousMessages.length - 1; i >= 0; i--) {
-      if (previousMessages[i].role === 'assistant' && previousMessages[i].assistantMessageId === resumeUuid) {
-        // Still needed only if no messages follow the resume point
-        return i === previousMessages.length - 1;
-      }
+  private async resolveMainAgentDynamicSystemPromptSections(): Promise<readonly string[]> {
+    try {
+      return await this.deps.plugin.getMainAgentDynamicSystemPromptSections?.() ?? [];
+    } catch {
+      return [];
     }
-    return false;
   }
 
   // ============================================
   // Message Sending
   // ============================================
 
-  async sendMessage(options?: {
-    editorContextOverride?: EditorSelectionContext | null;
-    browserContextOverride?: BrowserSelectionContext | null;
-    canvasContextOverride?: CanvasSelectionContext | null;
-    content?: string;
-    images?: ChatMessage['images'];
-    turnRequestOverride?: ChatTurnRequest;
-  }): Promise<void> {
+  async sendMessage(options?: SendMessageOptions): Promise<void> {
+    if (this.deps.canStartTurn?.() === false) return;
+    await this.turnCoordinator.run(options);
+  }
+
+  resumeQueuedTurnAfterIntentAdmission(): void {
+    if (this.deps.canStartTurn?.() === false) return;
+    if (this.deps.state.isStreaming || !this.deps.state.queuedMessage) return;
+    this.processQueuedMessage();
+  }
+
+  async handleExecutionEvent(event: ProviderExecutionEvent): Promise<void> {
+    const assistant = this.activeStreamingAssistantMessage;
+    if (!assistant) return;
+    if (event.type === 'user_message_started') {
+      await this.handleProviderMessageBoundaryChunk({
+        content: event.content ?? '',
+        itemId: event.nativeUserMessageId,
+        type: 'user_message_start',
+      });
+      return;
+    }
+    if (event.type === 'assistant_message_started') {
+      await this.handleProviderMessageBoundaryChunk({
+        itemId: event.nativeAssistantId,
+        type: 'assistant_message_start',
+      });
+      return;
+    }
+    const chunk = providerOutputEventToStreamChunk(event);
+    if (chunk) {
+      await this.deps.streamController.handleStreamChunk(
+        chunk,
+        this.activeStreamingAssistantMessage ?? assistant,
+      );
+    }
+  }
+
+  private async executeSendMessage(options?: SendMessageOptions): Promise<void> {
     const {
       plugin,
       state,
@@ -206,13 +304,16 @@ export class InputController {
       canvasSelectionController,
       conversationController
     } = this.deps;
+    this.discardDeferredReviewForDifferentConversation();
 
     // During conversation creation/switching, don't send - input is preserved so user can retry
-    if (state.isCreatingConversation || state.isSwitchingConversation) return;
+    if (state.isCreatingConversation || state.isSwitchingConversation) {
+      this.reportDeferredReviewableSettlement();
+      return;
+    }
 
     const inputEl = this.deps.getInputEl();
     const imageContextManager = this.deps.getImageContextManager();
-    const fileContextManager = this.deps.getFileContextManager();
 
     const contentOverride = options?.content;
     const shouldUseInput = contentOverride === undefined;
@@ -221,11 +322,25 @@ export class InputController {
     const hasImages = imageOverride !== undefined
       ? imageOverride.length > 0
       : (imageContextManager?.hasImages() ?? false);
-    if (!content && !hasImages) return;
+    if (!content && !hasImages) {
+      this.reportDeferredReviewableSettlement();
+      return;
+    }
+
+    if (state.isRewinding) {
+      new Notice(t('chat.rewind.inProgress'));
+      this.reportDeferredReviewableSettlement();
+      return;
+    }
 
     // Check for built-in commands first (e.g., /clear, /new, /add-dir)
-    const builtInCmd = detectBuiltInCommand(content);
+    const builtInCmd = detectBuiltInCommand(content, this.getActiveProviderId());
     if (builtInCmd) {
+      if (builtInCmd.command.action === 'clear') {
+        this.clearDeferredReviewableSettlement();
+      } else {
+        this.reportDeferredReviewableSettlement();
+      }
       if (shouldUseInput) {
         inputEl.value = '';
         this.deps.resetInputHeight();
@@ -265,6 +380,11 @@ export class InputController {
       return;
     }
 
+    state.acknowledgeReview();
+
+    let turnConversationId = state.currentConversationId;
+    this.delegatePendingSteerCorrelationToHistory(turnConversationId);
+
     if (shouldUseInput) {
       inputEl.value = '';
       this.deps.resetInputHeight();
@@ -282,7 +402,10 @@ export class InputController {
       welcomeEl.addClass('claudian-hidden');
     }
 
-    fileContextManager?.startSession();
+    const linkedContentController = this.deps.getLinkedContentController();
+    const linkedContentSubmission = state.currentConversationId
+      ? null
+      : linkedContentController.beginSubmission();
 
     // Slash commands are passed directly to SDK for handling
     // SDK handles expansion, $ARGUMENTS, @file references, and frontmatter options
@@ -308,8 +431,8 @@ export class InputController {
         canvasContextOverride: options?.canvasContextOverride,
       });
     const { displayContent, turnRequest } = turnSubmission;
-
-    fileContextManager?.markCurrentNoteSent();
+    const messagesBeforeTurn = state.messages;
+    const hadPendingConversationSave = state.hasPendingConversationSave;
 
     const userMsg: ChatMessage = {
       id: this.deps.generateId(),
@@ -323,7 +446,22 @@ export class InputController {
     state.hasPendingConversationSave = true;
     renderer.addMessage(userMsg);
 
-    await this.triggerTitleGeneration();
+    try {
+      await this.ensureConversationShell(linkedContentSubmission);
+      await this.triggerTitleGeneration();
+    } catch (error) {
+      if (linkedContentSubmission && !state.currentConversationId) {
+        linkedContentController.rollbackSubmission(linkedContentSubmission);
+      }
+      this.restoreMessageToInput(this.createQueuedMessage(displayContent, turnRequest));
+      this.rollbackFailedTurn(messagesBeforeTurn, hadPendingConversationSave);
+      throw error;
+    }
+    turnConversationId = state.currentConversationId;
+    const admittedTurnRequest = this.bindLinkedContentAtTurnAdmission(
+      turnRequest,
+      isCompact,
+    );
 
     const assistantMsg: ChatMessage = {
       id: this.deps.generateId(),
@@ -338,6 +476,7 @@ export class InputController {
     this.activateStreamingAssistantMessage(assistantMsg);
     this.pendingProviderUserMessages = [{
       displayContent,
+      linkedContentPath: admittedTurnRequest.linkedContentPath,
       images: imagesForMessage,
     }];
     this.sawInitialProviderUserMessage = false;
@@ -353,209 +492,288 @@ export class InputController {
     let wasInvalidated = false;
     let didEnqueueToSdk = false;
     let planCompleted = false;
+    let didRollbackUnsentTurn = false;
+    let shouldReportReviewableSettlement = false;
+    let currentReviewableSettlementReporter: (() => void) | null = null;
+    let didCancelThisTurn = false;
+    let planApprovalInvalidated = false;
+    let scheduledContinuation = false;
+    let continuationStaysInCurrentController = false;
 
-    // Lazy initialization: ensure service is ready before first query
-    if (this.deps.ensureServiceInitialized) {
-      const ready = await this.deps.ensureServiceInitialized();
+    // Lazy initialization: bind and prepare execution on the first provider action.
+    if (this.deps.ensureExecutionInitialized) {
+      const ready = await this.deps.ensureExecutionInitialized();
       if (!ready) {
-        new Notice('Failed to initialize agent service. Please try again.');
-        streamController.hideThinkingIndicator();
-        state.isStreaming = false;
+        new Notice('Failed to initialize agent execution. Please try again.');
+        this.restoreMessageToInput(this.createQueuedMessage(displayContent, admittedTurnRequest));
+        this.rollbackFailedTurn(messagesBeforeTurn, hadPendingConversationSave);
         this.activeStreamingAssistantMessage = null;
         this.resetProviderMessageBoundaryState();
+        this.reportDeferredReviewableSettlement();
         return;
       }
     }
 
-    const agentService = this.getAgentService();
-    if (!agentService) {
-      new Notice('Agent service not available. Please reload the plugin.');
+    const coordinator = this.getExecutionCoordinator();
+    if (!coordinator) {
+      new Notice('Agent execution is not available. Please reload the plugin.');
+      this.restoreMessageToInput(this.createQueuedMessage(displayContent, admittedTurnRequest));
+      this.rollbackFailedTurn(messagesBeforeTurn, hadPendingConversationSave);
       this.activeStreamingAssistantMessage = null;
       this.resetProviderMessageBoundaryState();
+      this.reportDeferredReviewableSettlement();
       return;
     }
 
-    // Restore pendingResumeAt from persisted conversation state (survives plugin reload)
-    const conversationIdForSend = state.currentConversationId;
-    if (conversationIdForSend) {
-      const conv = plugin.getConversationSync(conversationIdForSend);
-      if (conv?.resumeAtMessageId) {
-        if (this.isResumeSessionAtStillNeeded(conv.resumeAtMessageId, state.messages.slice(0, -2))) {
-          agentService.setResumeCheckpoint(conv.resumeAtMessageId);
-        } else {
-          try {
-            await plugin.updateConversation(conversationIdForSend, { resumeAtMessageId: undefined });
-          } catch {
-            // Best-effort — don't block send
-          }
-        }
-      }
-    }
+    const dynamicSystemPromptSections = await this.resolveMainAgentDynamicSystemPromptSections();
 
     try {
-      const preparedTurn = agentService.prepareTurn(turnRequest);
-      userMsg.content = preparedTurn.persistedContent;
-      userMsg.currentNote = preparedTurn.isCompact
-        ? undefined
-        : preparedTurn.request.currentNotePath;
-
-      // Pass history WITHOUT current turn (userMsg + assistantMsg we just added)
-      // This prevents duplication when rebuilding context for new sessions
-      const previousMessages = state.messages.slice(0, -2);
-      for await (const chunk of agentService.query(preparedTurn, previousMessages)) {
-        if (state.streamGeneration !== streamGeneration) {
-          wasInvalidated = true;
-          break;
+      userMsg.content = admittedTurnRequest.text;
+      userMsg.linkedContentPath = admittedTurnRequest.linkedContentPath;
+      const result = await coordinator.execute(this.createExecutionSubmission(
+        displayContent,
+        admittedTurnRequest,
+        userMsg,
+        assistantMsg,
+        dynamicSystemPromptSections,
+      ));
+      didEnqueueToSdk = result.accepted;
+      planCompleted = result.planCompleted;
+      shouldReportReviewableSettlement = result.status === 'completed'
+        || (result.status === 'error' && result.accepted);
+      if (shouldReportReviewableSettlement) {
+        currentReviewableSettlementReporter = this.deps.captureReviewableSettlement?.(
+          result.status === 'error' ? 'error' : 'completed',
+        ) ?? null;
+      }
+      if (result.status === 'cancelled') {
+        wasInterrupted = true;
+      } else if (result.status === 'invalidated') {
+        wasInvalidated = true;
+      } else if (result.status === 'missing-session') {
+        const retryMessage = result.accepted
+          ? null
+          : this.createQueuedMessage(displayContent, {
+            ...admittedTurnRequest,
+            images: imagesForMessage ?? admittedTurnRequest.images,
+          });
+        const pendingMessagesToRestore = state.queuedMessage
+          ? this.cloneQueuedMessage(state.queuedMessage)
+          : null;
+        const composerDraftToRestore = this.captureComposerDraft();
+        const resolution = result.missingSessionResolution ?? 'not_found';
+        if (resolution === 'deleted') {
+          this.restoreMessageToInput(composerDraftToRestore, { mergeWithComposer: true });
+          this.restoreMessageToInput(pendingMessagesToRestore, { mergeWithComposer: true });
+          this.restoreMessageToInput(retryMessage, { mergeWithComposer: true });
+        } else if (retryMessage) {
+          this.restoreMessageToInput(retryMessage, { mergeWithComposer: true });
+          this.rollbackFailedTurn(messagesBeforeTurn, hadPendingConversationSave);
         }
-        if (state.cancelRequested) {
-          wasInterrupted = true;
-          break;
+        if (result.accepted) {
+          this.finishAcceptedMissingSession(streamGeneration);
         }
-
-        if (await this.handleProviderMessageBoundaryChunk(chunk)) {
-          continue;
-        }
-
-        await streamController.handleStreamChunk(
-          chunk,
-          this.activeStreamingAssistantMessage ?? assistantMsg,
-        );
+        const notice = resolution === 'deleted'
+            ? 'The provider session no longer exists. Its Claudian record was removed; send again to start a new session.'
+            : resolution === 'reset'
+              ? 'The provider session no longer exists. Claudian preserved the recoverable history; send again to rebuild the session.'
+              : resolution === 'preserved'
+                ? 'The provider session no longer exists. Claudian preserved its record because the remaining history could not be verified.'
+                : 'The provider session no longer exists. Send again to start a new session.';
+        new Notice(notice);
+        wasInvalidated = true;
+      } else if (result.status === 'error' && result.error) {
+        await streamController.appendText(`\n\n**Error:** ${result.error.message}`);
       }
     } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-      await streamController.appendText(`\n\n**Error:** ${errorMsg}`);
+      if (error instanceof ChatExecutionPreHandoffError) {
+        this.restoreMessageToInput(
+          this.createQueuedMessage(displayContent, admittedTurnRequest),
+          { mergeWithComposer: true },
+        );
+        this.rollbackFailedTurn(messagesBeforeTurn, hadPendingConversationSave);
+        didRollbackUnsentTurn = true;
+        new Notice('Message was not sent. Please try again.');
+        this.reportDeferredReviewableSettlement();
+      } else {
+        shouldReportReviewableSettlement = true;
+        const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+        await streamController.appendText(`\n\n**Error:** ${errorMsg}`);
+        currentReviewableSettlementReporter =
+          this.deps.captureReviewableSettlement?.('error') ?? null;
+      }
     } finally {
       const finalAssistantMsg = this.activeStreamingAssistantMessage ?? assistantMsg;
-      const turnMetadata = agentService.consumeTurnMetadata();
-      userMsg.userMessageId = turnMetadata.userMessageId ?? userMsg.userMessageId;
-      finalAssistantMsg.assistantMessageId = turnMetadata.assistantMessageId ?? finalAssistantMsg.assistantMessageId;
-      didEnqueueToSdk = didEnqueueToSdk || turnMetadata.wasSent === true;
-      planCompleted = planCompleted || turnMetadata.planCompleted === true;
 
       // ALWAYS clear the timer interval, even on stream invalidation (prevents memory leaks)
       state.clearFlavorTimerInterval();
 
-      // Skip remaining cleanup if stream was invalidated (tab closed or conversation switched)
-      if (!wasInvalidated && state.streamGeneration === streamGeneration) {
-        const didCancelThisTurn = wasInterrupted || state.cancelRequested;
-        if (didCancelThisTurn && !state.pendingNewSessionPlan) {
-          await streamController.appendText('\n\n<span class="claudian-interrupted">Interrupted</span> <span class="claudian-interrupted-hint">· What should Claudian do instead?</span>');
-        }
-        streamController.hideThinkingIndicator();
-        state.isStreaming = false;
-        state.cancelRequested = false;
-        this.restorePendingSteerMessageToQueue();
-
-        // Capture response duration before resetting state (skip for interrupted responses and compaction)
-        const hasCompactBoundary = finalAssistantMsg.contentBlocks?.some(b => b.type === 'context_compacted');
-        if (!didCancelThisTurn && !hasCompactBoundary) {
-          const durationSeconds = state.responseStartTime
-            ? Math.floor((performance.now() - state.responseStartTime) / 1000)
-            : 0;
-          if (durationSeconds > 0) {
-            const flavorWord =
-              COMPLETION_FLAVOR_WORDS[Math.floor(Math.random() * COMPLETION_FLAVOR_WORDS.length)];
-            finalAssistantMsg.durationSeconds = durationSeconds;
-            finalAssistantMsg.durationFlavorWord = flavorWord;
-            // Add footer to live message in DOM
+      try {
+        // Skip remaining cleanup if stream was invalidated (tab closed or conversation switched)
+        if (
+          !wasInvalidated
+          && !didRollbackUnsentTurn
+          && state.streamGeneration === streamGeneration
+        ) {
+          didCancelThisTurn = wasInterrupted || state.cancelRequested;
+          if (didCancelThisTurn && !state.pendingNewSessionPlan) {
+            finalAssistantMsg.isInterrupt = true;
             if (state.currentContentEl) {
-              const footerEl = state.currentContentEl.createDiv({ cls: 'claudian-response-footer' });
-              footerEl.createSpan({
-                text: `* ${flavorWord} for ${formatDurationMmSs(durationSeconds)}`,
-                cls: 'claudian-baked-duration',
-              });
+              renderer.appendInterruptIndicator(state.currentContentEl);
+            }
+          }
+          streamController.hideThinkingIndicator();
+          state.isStreaming = false;
+          state.cancelRequested = false;
+
+          // Capture response duration before resetting state (skip for interrupted responses and compaction)
+          const hasCompactBoundary = finalAssistantMsg.contentBlocks?.some(b => b.type === 'context_compacted');
+          if (!didCancelThisTurn && !hasCompactBoundary) {
+            const durationSeconds = state.responseStartTime
+              ? Math.floor((performance.now() - state.responseStartTime) / 1000)
+              : 0;
+            if (durationSeconds > 0) {
+              const flavorWord =
+                COMPLETION_FLAVOR_WORDS[Math.floor(Math.random() * COMPLETION_FLAVOR_WORDS.length)];
+              finalAssistantMsg.durationSeconds = durationSeconds;
+              finalAssistantMsg.durationFlavorWord = flavorWord;
+              // Add footer to live message in DOM
+              if (state.currentContentEl) {
+                const footerEl = state.currentContentEl.createDiv({ cls: 'claudian-response-footer' });
+                footerEl.createSpan({
+                  text: `* ${flavorWord} for ${formatDurationMmSs(durationSeconds)}`,
+                  cls: 'claudian-baked-duration',
+                });
+              }
+            }
+          }
+
+          state.currentContentEl = null;
+
+          await streamController.finalizeCurrentThinkingBlock(finalAssistantMsg);
+          await streamController.finalizeCurrentTextBlock(finalAssistantMsg);
+          this.deps.getSubagentManager().resetStreamingState();
+
+          // Auto-hide completed todo panel on response end
+          // Panel reappears only when new TodoWrite tool is called
+          if (state.currentTodos && state.currentTodos.every(t => t.status === 'completed')) {
+            state.currentTodos = null;
+          }
+          this.syncScrollToBottomAfterRenderUpdates();
+
+          // approve-new-session: the tool_result chunk is dropped because cancelRequested
+          // was set before the stream loop could process it — manually set the result so
+          // the saved conversation renders correctly when revisited
+          if (state.pendingNewSessionPlan && finalAssistantMsg.toolCalls) {
+            for (const tc of finalAssistantMsg.toolCalls) {
+              if (tc.name === TOOL_EXIT_PLAN_MODE && !tc.result) {
+                tc.status = 'completed';
+                tc.result = 'User approved the plan and started a new session.';
+                updateToolCallResult(tc.id, tc, state.toolCallElements);
+              }
+            }
+          }
+
+          // Provider-agnostic post-plan approval: show UI and await decision before save/auto-send
+          let planAutoSendContent: string | null = null;
+          let shouldProcessQueuedMessage = true;
+          if (planCompleted && !didCancelThisTurn) {
+            const planInteractionId = `local-plan-approval:${streamGeneration}`;
+            state.beginActionRequired(planInteractionId);
+            let decisionResult: { decision: PlanApprovalDecision | null; invalidated: boolean };
+            try {
+              decisionResult = await this.showPlanApproval();
+            } finally {
+              state.endActionRequired(planInteractionId);
+            }
+            const { decision, invalidated } = decisionResult;
+
+            // Re-check invalidation after async approval prompt
+            if (state.streamGeneration !== streamGeneration || invalidated) {
+              planApprovalInvalidated = true;
+            } else if (decision?.type === 'implement') {
+              await this.deps.restorePrePlanPermissionModeIfNeeded?.();
+              planAutoSendContent = 'Implement the plan.';
+            } else if (decision?.type === 'revise') {
+              // Keep plan mode active, populate input with feedback text
+              this.deps.getInputEl().value = decision.text;
+              shouldProcessQueuedMessage = false;
+            } else {
+              // cancel or null (dismissed)
+              await this.deps.restorePrePlanPermissionModeIfNeeded?.();
+            }
+          }
+
+          if (!planApprovalInvalidated) {
+            // Only clear resumeAtMessageId if enqueue succeeded; preserve checkpoint on failure for retry
+            const saveExtras = didEnqueueToSdk ? { resumeAtMessageId: undefined } : undefined;
+            await conversationController.save(true, saveExtras);
+
+            const userMsgIndex = state.messages.indexOf(userMsg);
+            renderer.refreshActionButtons(userMsg, state.messages, userMsgIndex >= 0 ? userMsgIndex : undefined);
+
+            // Auto-implement takes precedence over both approve-new-session and queued input
+            if (planAutoSendContent) {
+              scheduledContinuation = true;
+              continuationStaysInCurrentController = true;
+              this.deps.getInputEl().value = planAutoSendContent;
+              this.deferReviewableSettlement(currentReviewableSettlementReporter);
+              this.sendMessage().catch(() => this.reportDeferredReviewableSettlement());
+            } else {
+              // approve-new-session: create fresh conversation and send plan content
+              // Must be inside the invalidation guard — if the tab was closed or
+              // conversation switched, we must not create a new session on stale state.
+              const planContent = state.pendingNewSessionPlan;
+              if (planContent) {
+                state.pendingNewSessionPlan = null;
+                const handledByLayout = await this.deps.handleNewSessionPlan?.(planContent) ?? false;
+                if (handledByLayout) {
+                  scheduledContinuation = true;
+                } else {
+                  await conversationController.createNew();
+                  scheduledContinuation = true;
+                  continuationStaysInCurrentController = true;
+                  this.deps.getInputEl().value = planContent;
+                  this.deferReviewableSettlement(currentReviewableSettlementReporter);
+                  this.sendMessage().catch(() => this.reportDeferredReviewableSettlement());
+                }
+              } else if (shouldProcessQueuedMessage) {
+                scheduledContinuation = this.processQueuedMessage();
+                continuationStaysInCurrentController = scheduledContinuation;
+              }
             }
           }
         }
 
-        state.currentContentEl = null;
-
-        await streamController.finalizeCurrentThinkingBlock(finalAssistantMsg);
-        await streamController.finalizeCurrentTextBlock(finalAssistantMsg);
-        this.deps.getSubagentManager().resetStreamingState();
-
-        // Auto-hide completed todo panel on response end
-        // Panel reappears only when new TodoWrite tool is called
-        if (state.currentTodos && state.currentTodos.every(t => t.status === 'completed')) {
-          state.currentTodos = null;
+        if (wasInvalidated) {
+          this.clearCurrentPendingSteerUi();
+          this.updateQueueIndicator();
         }
-        this.syncScrollToBottomAfterRenderUpdates();
-
-        // approve-new-session: the tool_result chunk is dropped because cancelRequested
-        // was set before the stream loop could process it — manually set the result so
-        // the saved conversation renders correctly when revisited
-        if (state.pendingNewSessionPlan && finalAssistantMsg.toolCalls) {
-          for (const tc of finalAssistantMsg.toolCalls) {
-            if (tc.name === TOOL_EXIT_PLAN_MODE && !tc.result) {
-              tc.status = 'completed';
-              tc.result = 'User approved the plan and started a new session.';
-              updateToolCallResult(tc.id, tc, state.toolCallElements);
+      } finally {
+        const currentSettlementIsReviewable = shouldReportReviewableSettlement
+          && !didCancelThisTurn
+          && !planApprovalInvalidated
+          && state.streamGeneration === streamGeneration;
+        if (scheduledContinuation) {
+          if (continuationStaysInCurrentController) {
+            if (currentSettlementIsReviewable && currentReviewableSettlementReporter) {
+              this.deferReviewableSettlement(currentReviewableSettlementReporter);
             }
-          }
-        }
-
-        // Provider-agnostic post-plan approval: show UI and await decision before save/auto-send
-        let planAutoSendContent: string | null = null;
-        let planApprovalInvalidated = false;
-        let shouldProcessQueuedMessage = true;
-        if (planCompleted && !didCancelThisTurn) {
-          const { decision, invalidated } = await this.showPlanApproval();
-
-          // Re-check invalidation after async approval prompt
-          if (state.streamGeneration !== streamGeneration || invalidated) {
-            planApprovalInvalidated = true;
-          } else if (decision?.type === 'implement') {
-            this.deps.restorePrePlanPermissionModeIfNeeded?.();
-            planAutoSendContent = 'Implement the plan.';
-          } else if (decision?.type === 'revise') {
-            // Keep plan mode active, populate input with feedback text
-            this.deps.getInputEl().value = decision.text;
-            shouldProcessQueuedMessage = false;
           } else {
-            // cancel or null (dismissed)
-            this.deps.restorePrePlanPermissionModeIfNeeded?.();
+            this.clearDeferredReviewableSettlement();
           }
+        } else if (currentSettlementIsReviewable) {
+          this.reportCurrentOrDeferredReviewableSettlement(
+            currentReviewableSettlementReporter,
+          );
+        } else {
+          this.reportDeferredReviewableSettlement();
         }
 
-        if (!planApprovalInvalidated) {
-          // Only clear resumeAtMessageId if enqueue succeeded; preserve checkpoint on failure for retry
-          const saveExtras = didEnqueueToSdk ? { resumeAtMessageId: undefined } : undefined;
-          await conversationController.save(true, saveExtras);
-
-          const userMsgIndex = state.messages.indexOf(userMsg);
-          renderer.refreshActionButtons(userMsg, state.messages, userMsgIndex >= 0 ? userMsgIndex : undefined);
-
-          // Auto-implement takes precedence over both approve-new-session and queued input
-          if (planAutoSendContent) {
-            this.deps.getInputEl().value = planAutoSendContent;
-            this.sendMessage().catch(() => {});
-          } else {
-            // approve-new-session: create fresh conversation and send plan content
-            // Must be inside the invalidation guard — if the tab was closed or
-            // conversation switched, we must not create a new session on stale state.
-            const planContent = state.pendingNewSessionPlan;
-            if (planContent) {
-              state.pendingNewSessionPlan = null;
-              await conversationController.createNew();
-              this.deps.getInputEl().value = planContent;
-              this.sendMessage().catch(() => {
-                // sendMessage() handles its own errors internally; this prevents
-                // unhandled rejection if an unexpected error slips through.
-              });
-            } else if (shouldProcessQueuedMessage) {
-              this.processQueuedMessage();
-            }
-          }
-        }
+        this.delegatePendingSteerCorrelationToHistory(turnConversationId);
+        this.activeStreamingAssistantMessage = null;
+        this.resetProviderMessageBoundaryState();
       }
-
-      if (wasInvalidated) {
-        this.clearPendingSteerState();
-        this.updateQueueIndicator();
-      }
-
-      this.activeStreamingAssistantMessage = null;
-      this.resetProviderMessageBoundaryState();
     }
   }
 
@@ -570,9 +788,13 @@ export class InputController {
 
     indicatorEl.empty();
 
-    const visibleQueuedMessage = state.queuedMessage ?? this.pendingSteerMessage;
+    const pendingSteer = this.getCurrentPendingSteer();
+    const visiblePendingSteer = pendingSteer?.uiState === 'visible'
+      ? pendingSteer.message
+      : null;
+    const visibleQueuedMessage = state.queuedMessage ?? visiblePendingSteer;
     if (visibleQueuedMessage) {
-      const isPendingSteerOnly = !state.queuedMessage && !!this.pendingSteerMessage;
+      const isPendingSteerOnly = !state.queuedMessage && !!visiblePendingSteer;
       indicatorEl.createSpan({
         cls: 'claudian-queue-indicator-text',
         text: `${isPendingSteerOnly ? '⌙ Steering: ' : '⌙ Queued: '}${this.getQueuedMessageDisplay(visibleQueuedMessage)}`,
@@ -584,10 +806,12 @@ export class InputController {
         if (this.canSteerQueuedMessage()) {
           const steerButton = actionsEl.createEl('button', {
             cls: 'claudian-queue-indicator-action',
-            text: this.steerInFlight ? 'Steering...' : 'Steer Now',
+            text: pendingSteer?.providerDisposition === 'awaiting-result'
+              ? 'Steering...'
+              : 'Steer Now',
           });
           steerButton.setAttribute('type', 'button');
-          if (this.steerInFlight) {
+          if (pendingSteer?.providerDisposition === 'awaiting-result') {
             steerButton.setAttribute('disabled', 'true');
           } else {
             steerButton.addEventListener('click', (event) => {
@@ -643,6 +867,20 @@ export class InputController {
     this.updateQueueIndicator();
   }
 
+  restoreRewoundMessageToComposer(
+    message: Pick<ChatMessage, 'content' | 'images'>,
+  ): void {
+    this.restoreMessageToInput({
+      canvasContext: null,
+      content: message.content,
+      editorContext: null,
+      images: message.images,
+    });
+    const inputEl = this.deps.getInputEl();
+    const EventConstructor = inputEl.ownerDocument?.defaultView?.Event ?? Event;
+    inputEl.dispatchEvent(new EventConstructor('input', { bubbles: true }));
+  }
+
   private restoreMessageToInput(
     message: QueuedMessage | null,
     options: { mergeWithComposer?: boolean } = {},
@@ -661,28 +899,40 @@ export class InputController {
       ? (imageContextManager?.getAttachedImages() ?? [])
       : [];
     const restoredImages = [...(images ?? []), ...currentImages];
-    if (restoredImages.length > 0) {
-      imageContextManager?.setImages(restoredImages);
+    if (imageContextManager && (!options.mergeWithComposer || restoredImages.length > 0)) {
+      imageContextManager.setImages(restoredImages);
     }
     this.deps.resetInputHeight();
     inputEl.focus();
   }
 
-  private restorePendingMessagesToInput(): void {
+  private captureComposerDraft(): QueuedMessage | null {
+    const content = this.deps.getInputEl().value;
+    const attachedImages = this.deps.getImageContextManager()?.getAttachedImages() ?? [];
+    const images = attachedImages.length > 0 ? [...attachedImages] : undefined;
+    if (!content.trim() && !images) {
+      return null;
+    }
+
+    return this.createQueuedMessage(content, {
+      text: content,
+      images,
+    });
+  }
+
+  private restoreQueuedMessageToInput(): void {
     const { state } = this.deps;
-    const combinedMessage = this.mergePendingMessages(
-      this.pendingSteerMessage,
-      state.queuedMessage,
-    );
-    this.restoreMessageToInput(combinedMessage, { mergeWithComposer: true });
+    const queuedMessage = state.queuedMessage
+      ? this.cloneQueuedMessage(state.queuedMessage)
+      : null;
+    this.restoreMessageToInput(queuedMessage, { mergeWithComposer: true });
     state.queuedMessage = null;
-    this.clearPendingSteerState();
     this.updateQueueIndicator();
   }
 
-  private processQueuedMessage(): void {
+  private processQueuedMessage(): boolean {
     const { state } = this.deps;
-    if (!state.queuedMessage) return;
+    if (!state.queuedMessage) return false;
 
     const queuedMessage = this.cloneQueuedMessage(state.queuedMessage);
     state.queuedMessage = null;
@@ -690,14 +940,67 @@ export class InputController {
 
     window.setTimeout(
       () => {
+        if (this.deps.canStartTurn?.() === false) {
+          if (!state.queuedMessage) {
+            state.queuedMessage = queuedMessage;
+            this.updateQueueIndicator();
+          }
+          return;
+        }
         void this.sendMessage({
           content: queuedMessage.content,
           images: queuedMessage.images,
           turnRequestOverride: this.toQueuedChatTurn(queuedMessage).request,
-        });
+        }).catch(() => this.reportDeferredReviewableSettlement());
       },
       0
     );
+    return true;
+  }
+
+  private deferReviewableSettlement(report: (() => void) | null): void {
+    if (!report) return;
+    this.deferredReviewableSettlement = {
+      conversationId: this.deps.state.currentConversationId,
+      report,
+    };
+  }
+
+  private hasDeferredReviewableSettlement(): boolean {
+    this.discardDeferredReviewForDifferentConversation();
+    return this.deferredReviewableSettlement !== null;
+  }
+
+  private reportDeferredReviewableSettlement(): void {
+    if (!this.hasDeferredReviewableSettlement()) return;
+    const deferred = this.deferredReviewableSettlement;
+    this.clearDeferredReviewableSettlement();
+    deferred?.report();
+  }
+
+  private reportCurrentOrDeferredReviewableSettlement(
+    currentReporter: (() => void) | null,
+  ): void {
+    const reporter = currentReporter
+      ?? (this.hasDeferredReviewableSettlement()
+        ? this.deferredReviewableSettlement?.report ?? null
+        : null);
+    this.clearDeferredReviewableSettlement();
+    reporter?.();
+  }
+
+  private discardDeferredReviewForDifferentConversation(): void {
+    if (
+      this.deferredReviewableSettlement !== null
+      && this.deferredReviewableSettlement.conversationId
+        !== this.deps.state.currentConversationId
+    ) {
+      this.clearDeferredReviewableSettlement();
+    }
+  }
+
+  private clearDeferredReviewableSettlement(): void {
+    this.deferredReviewableSettlement = null;
   }
 
   private buildTurnSubmission(options: {
@@ -717,11 +1020,7 @@ export class InputController {
     } = this.deps;
 
     const fileContextManager = this.deps.getFileContextManager();
-    const mcpServerSelector = this.deps.getMcpServerSelector();
     const externalContextSelector = this.deps.getExternalContextSelector();
-
-    const currentNotePath = fileContextManager?.getCurrentNotePath() || null;
-    const shouldSendCurrentNote = fileContextManager?.shouldSendCurrentNote(currentNotePath) ?? false;
 
     const editorContext = options.editorContextOverride !== undefined
       ? options.editorContextOverride
@@ -735,27 +1034,129 @@ export class InputController {
 
     const externalContextPaths = externalContextSelector?.getExternalContexts();
     const isCompact = /^\/compact(\s|$)/i.test(options.content);
+    const candidateUserTurnOrdinal = this.deps.state.messages
+      .filter(isCanonicalUserMessage).length + 1;
+    const linkedContentPath = !isCompact && candidateUserTurnOrdinal === 1
+      ? this.deps.getLinkedContentController().getSnapshot().path ?? undefined
+      : undefined;
     const transformedText = !isCompact && fileContextManager
       ? fileContextManager.transformContextMentions(options.content)
       : options.content;
-    const enabledMcpServers = mcpServerSelector?.getEnabledServers();
-
     return {
       displayContent: options.content,
       turnRequest: {
         text: transformedText,
         images: options.images,
-        currentNotePath: shouldSendCurrentNote && currentNotePath ? currentNotePath : undefined,
+        linkedContentPath,
         editorSelection: editorContext,
         browserSelection: browserContext,
         canvasSelection: canvasContext,
         externalContextPaths: externalContextPaths && externalContextPaths.length > 0
           ? externalContextPaths
           : undefined,
-        enabledMcpServers: enabledMcpServers && enabledMcpServers.size > 0
-          ? enabledMcpServers
-          : undefined,
       },
+    };
+  }
+
+  private bindLinkedContentAtTurnAdmission(
+    request: ChatTurnRequest,
+    isCompact: boolean,
+  ): ChatTurnRequest {
+    const userTurnOrdinal = this.deps.state.messages
+      .filter(isCanonicalUserMessage).length;
+    const linkedContentPath = !isCompact && userTurnOrdinal === 1
+      ? request.linkedContentPath
+        ?? this.deps.getLinkedContentController().getSnapshot().path
+        ?? undefined
+      : undefined;
+    if (request.linkedContentPath === linkedContentPath) return request;
+
+    const admittedRequest = cloneChatTurnRequest(request);
+    if (linkedContentPath) {
+      admittedRequest.linkedContentPath = linkedContentPath;
+    } else {
+      delete admittedRequest.linkedContentPath;
+    }
+    return admittedRequest;
+  }
+
+  private createExecutionSubmission(
+    displayContent: string,
+    request: ChatTurnRequest,
+    user?: ChatMessage,
+    assistant?: ChatMessage,
+    dynamicSystemPromptSections: readonly string[] = [],
+  ): ChatTurnSubmission {
+    const providerId = this.getActiveProviderId();
+    const settings = ProviderSettingsCoordinator.getProviderSettingsSnapshot(
+      this.deps.plugin.settings,
+      providerId,
+    );
+    const reasoning = typeof settings.effortLevel === 'string'
+      ? settings.effortLevel
+      : typeof settings.thinkingBudget === 'string'
+        ? settings.thinkingBudget
+        : undefined;
+    const permissionMode = typeof settings.permissionMode === 'string'
+      ? settings.permissionMode
+      : undefined;
+    const serviceTier = typeof settings.serviceTier === 'string'
+      ? settings.serviceTier
+      : undefined;
+    const mode = permissionMode === 'plan' && this.getActiveCapabilities().supportsPlanMode
+      ? permissionMode
+      : undefined;
+    const images = [...(request.images ?? [])];
+    const existingUserTurns = this.deps.state.messages.filter(isCanonicalUserMessage).length;
+
+    return {
+      canonicalText: request.text,
+      configuration: {
+        ...(request.externalContextPaths
+          ? { externalWorkspaceRoots: [...request.externalContextPaths] }
+          : {}),
+        ...(this.getAuxiliaryModel()
+          ? { model: this.getAuxiliaryModel() ?? undefined }
+          : {}),
+        ...(permissionMode ? { permissionMode } : {}),
+        ...(mode ? { mode } : {}),
+        ...(reasoning ? { reasoning } : {}),
+        ...(serviceTier ? { serviceTier } : {}),
+        systemInstructions: dynamicSystemPromptSections.length > 0
+          ? {
+              dynamicSections: [...dynamicSystemPromptSections],
+              kind: 'provider-default',
+            }
+          : { kind: 'provider-default' },
+      },
+      context: {
+        ...(request.browserSelection
+          ? { browserSelection: request.browserSelection }
+          : {}),
+        ...(request.canvasSelection
+          ? { canvasSelection: request.canvasSelection }
+          : {}),
+        ...(request.linkedContentPath
+          ? { linkedContent: { path: request.linkedContentPath } }
+          : {}),
+        ...(request.editorSelection
+          ? { editorSelection: request.editorSelection }
+          : {}),
+        ...(request.externalContextPaths
+          ? { externalContextPaths: [...request.externalContextPaths] }
+          : {}),
+      },
+      conversationHistory: user && assistant
+        ? this.deps.state.messages.slice(0, -2)
+        : [...this.deps.state.messages],
+      images,
+      inputRecordId: this.deps.generateId(),
+      ...(user ? { localMessageId: user.id } : {}),
+      ...(user && assistant ? { messages: { assistant, user } } : {}),
+      rawDisplayText: displayContent,
+      timestamp: user?.timestamp ?? Date.now(),
+      toolPolicy: { kind: 'provider-default' },
+      userTurnOrdinal: user ? existingUserTurns : existingUserTurns + 1,
     };
   }
 
@@ -795,10 +1196,10 @@ export class InputController {
   }
 
   private canSteerQueuedMessage(): boolean {
-    const agentService = this.getAgentService();
     return this.deps.state.isStreaming
+      && this.getCurrentPendingSteer() === null
       && this.getActiveCapabilities().supportsTurnSteer === true
-      && typeof agentService?.steer === 'function';
+      && this.getExecutionCoordinator() !== null;
   }
 
   private cloneQueuedMessage(message: QueuedMessage): QueuedMessage {
@@ -823,7 +1224,10 @@ export class InputController {
     };
   }
 
-  private toQueuedChatTurn(message: QueuedMessage): QueuedChatTurn {
+  private toQueuedChatTurn(message: QueuedMessage): {
+    displayContent: string;
+    request: ChatTurnRequest;
+  } {
     if (message.turnRequest) {
       return {
         displayContent: message.content,
@@ -843,41 +1247,114 @@ export class InputController {
     };
   }
 
-  private mergePendingMessages(
-    first: QueuedMessage | null,
-    second: QueuedMessage | null,
-  ): QueuedMessage | null {
-    if (first && second) {
-      return this.mergeQueuedMessages(first, second);
-    }
-
-    if (first) {
-      return this.cloneQueuedMessage(first);
-    }
-
-    if (second) {
-      return this.cloneQueuedMessage(second);
-    }
-
-    return null;
+  private getCurrentPendingSteer(): PendingSteerState | null {
+    const conversationId = this.deps.state.currentConversationId;
+    if (!conversationId) return null;
+    return this.pendingSteersByConversation.get(conversationId) ?? null;
   }
 
-  private clearPendingSteerState(): void {
-    this.pendingSteerMessage = null;
-    this.steerInFlight = false;
+  private isPendingSteerRegistered(pending: PendingSteerState): boolean {
+    return this.pendingSteersByConversation.get(pending.conversationId) === pending;
   }
 
-  private restorePendingSteerMessageToQueue(): void {
-    if (!this.pendingSteerMessage) {
+  private clearCurrentPendingSteerUi(): void {
+    const pending = this.getCurrentPendingSteer();
+    if (!pending) return;
+    pending.uiState = 'cleared';
+    this.updateQueueIndicator();
+  }
+
+  private clearPendingSteerUi(pending: PendingSteerState): void {
+    pending.uiState = 'cleared';
+    if (pending.conversationId === this.deps.state.currentConversationId) {
+      this.updateQueueIndicator();
+    }
+  }
+
+  private releasePendingSteer(pending: PendingSteerState): void {
+    if (this.isPendingSteerRegistered(pending)) {
+      this.pendingSteersByConversation.delete(pending.conversationId);
+      pending.coordinator.releaseSteerCorrelation(pending.inputRecordId);
+    }
+  }
+
+  private delegatePendingSteerCorrelationToHistory(
+    conversationId: string | null,
+  ): void {
+    if (!conversationId) return;
+    const pending = this.pendingSteersByConversation.get(conversationId);
+    if (!pending) return;
+
+    if (pending.correlationState === 'pending') {
+      pending.correlationState = 'delegated-to-history';
+    }
+    this.clearPendingSteerUi(pending);
+    if (
+      pending.providerDisposition !== 'awaiting-result'
+      || pending.correlationState === 'settled'
+    ) {
+      this.releasePendingSteer(pending);
+    }
+  }
+
+  private restoreDefinitelyUnsentSteer(pending: PendingSteerState): void {
+    if (
+      pending.retryState === 'restored'
+      || pending.providerDisposition === 'accepted-awaiting-correlation'
+    ) {
       return;
     }
 
+    pending.providerDisposition = 'definitely-unsent';
+    pending.correlationState = 'settled';
+    this.clearPendingSteerUi(pending);
+    if (
+      pending.conversationId !== this.deps.state.currentConversationId
+      || this.deps.state.isSwitchingConversation
+      || this.deps.state.isCreatingConversation
+    ) {
+      pending.retryState = 'parked';
+      return;
+    }
+
+    this.restoreDefinitelyUnsentSteerForActiveConversation(pending);
+  }
+
+  private restoreDefinitelyUnsentSteerForActiveConversation(
+    pending: PendingSteerState,
+  ): void {
+    if (pending.retryState === 'restored') return;
+
+    pending.retryState = 'restored';
+    this.releasePendingSteer(pending);
+
     const { state } = this.deps;
-    const pendingSteerMessage = this.cloneQueuedMessage(this.pendingSteerMessage);
-    this.clearPendingSteerState();
-    state.queuedMessage = state.queuedMessage
-      ? this.mergeQueuedMessages(pendingSteerMessage, state.queuedMessage)
-      : pendingSteerMessage;
+    if (state.isStreaming && !state.cancelRequested) {
+      state.queuedMessage = state.queuedMessage
+        ? this.mergeQueuedMessages(pending.message, state.queuedMessage)
+        : this.cloneQueuedMessage(pending.message);
+    } else {
+      this.restoreMessageToInput(pending.message, { mergeWithComposer: true });
+    }
+    this.updateQueueIndicator();
+  }
+
+  onConversationActivated(): void {
+    this.discardDeferredReviewForDifferentConversation();
+    if (
+      this.deps.state.isSwitchingConversation
+      || this.deps.state.isCreatingConversation
+    ) {
+      return;
+    }
+    const pending = this.getCurrentPendingSteer();
+    if (
+      pending?.providerDisposition === 'definitely-unsent'
+      && pending.retryState === 'parked'
+    ) {
+      this.restoreDefinitelyUnsentSteerForActiveConversation(pending);
+      return;
+    }
     this.updateQueueIndicator();
   }
 
@@ -897,71 +1374,76 @@ export class InputController {
   }
 
   private async steerQueuedMessage(): Promise<void> {
-    if (this.steerInFlight) {
-      return;
-    }
-
     const { state } = this.deps;
-    const agentService = this.getAgentService();
-    if (!state.queuedMessage || !this.canSteerQueuedMessage() || !agentService?.steer) {
+    const coordinator = this.getExecutionCoordinator();
+    const conversationId = state.currentConversationId;
+    if (!state.queuedMessage || !this.canSteerQueuedMessage() || !coordinator) {
       return;
     }
+    if (!conversationId) return;
 
     const queuedMessage = this.cloneQueuedMessage(state.queuedMessage);
     state.queuedMessage = null;
-    this.pendingSteerMessage = queuedMessage;
-    this.steerInFlight = true;
+    const { displayContent, request } = this.toQueuedChatTurn(queuedMessage);
+    const dynamicSystemPromptSections = await this.resolveMainAgentDynamicSystemPromptSections();
+    const submission = this.createExecutionSubmission(
+      displayContent,
+      request,
+      undefined,
+      undefined,
+      dynamicSystemPromptSections,
+    );
+    const pending: PendingSteerState = {
+      conversationId,
+      coordinator,
+      correlationState: 'pending',
+      expectedProviderMessage: {
+        displayContent,
+        persistedContent: request.text,
+        linkedContentPath: /^\/compact(\s|$)/i.test(request.text)
+          ? undefined
+          : request.linkedContentPath,
+        images: request.images,
+      },
+      inputRecordId: submission.inputRecordId,
+      message: queuedMessage,
+      providerDisposition: 'awaiting-result',
+      retryState: 'blocked',
+      uiState: 'visible',
+    };
+    this.pendingSteersByConversation.set(conversationId, pending);
     this.updateQueueIndicator();
 
     try {
-      const { displayContent, request } = this.toQueuedChatTurn(queuedMessage);
-
-      const preparedTurn = agentService.prepareTurn(request);
-      const accepted = await agentService.steer(preparedTurn);
-      if (state.cancelRequested || !this.pendingSteerMessage) {
-        return;
-      }
+      const accepted = await coordinator.steer(submission);
       if (!accepted) {
-        this.restoreQueuedMessageAfterSteerFailure(queuedMessage);
+        if (pending.providerDisposition === 'accepted-awaiting-correlation') return;
+        this.restoreDefinitelyUnsentSteer(pending);
         return;
       }
 
-      this.deps.getFileContextManager()?.markCurrentNoteSent();
+      pending.providerDisposition = 'accepted-awaiting-correlation';
+      this.clearPendingSteerUi(pending);
+      if (pending.correlationState !== 'pending') {
+        this.releasePendingSteer(pending);
+      }
+    } catch (error) {
+      if (pending.providerDisposition === 'accepted-awaiting-correlation') return;
+      if (error instanceof ChatExecutionPreHandoffError) {
+        this.restoreDefinitelyUnsentSteer(pending);
+        new Notice('Failed to steer the queued message. It is still available.');
+        return;
+      }
 
-      this.pendingProviderUserMessages.push({
-        displayContent,
-        persistedContent: preparedTurn.persistedContent,
-        currentNote: preparedTurn.isCompact
-          ? undefined
-          : preparedTurn.request.currentNotePath,
-        images: request.images,
-      });
-    } catch {
-      this.restoreQueuedMessageAfterSteerFailure(queuedMessage);
-      new Notice('Failed to steer the queued Codex message. It is still available.');
+      pending.providerDisposition = 'ambiguous-awaiting-reconciliation';
+      this.clearPendingSteerUi(pending);
+      if (pending.correlationState !== 'pending') {
+        this.releasePendingSteer(pending);
+      }
+      new Notice(
+        'Steer delivery could not be confirmed. The message was not requeued to avoid sending it twice.',
+      );
     }
-  }
-
-  private restoreQueuedMessageAfterSteerFailure(
-    message: QueuedMessage,
-  ): void {
-    const { state } = this.deps;
-    this.clearPendingSteerState();
-    if (state.cancelRequested) {
-      this.updateQueueIndicator();
-      return;
-    }
-
-    if (state.isStreaming) {
-      state.queuedMessage = state.queuedMessage
-        ? this.mergeQueuedMessages(message, state.queuedMessage)
-        : message;
-      this.updateQueueIndicator();
-      return;
-    }
-
-    this.restoreMessageToInput(message, { mergeWithComposer: true });
-    this.updateQueueIndicator();
   }
 
   private activateStreamingAssistantMessage(message: ChatMessage): void {
@@ -1005,14 +1487,30 @@ export class InputController {
   private async handleProviderUserMessageStart(
     chunk: Extract<StreamChunk, { type: 'user_message_start' }>,
   ): Promise<void> {
-    const expected = this.pendingProviderUserMessages.shift();
     if (!this.sawInitialProviderUserMessage) {
+      this.pendingProviderUserMessages.shift();
       this.sawInitialProviderUserMessage = true;
       return;
     }
 
-    this.clearPendingSteerState();
-    this.updateQueueIndicator();
+    const pendingSteer = this.getCurrentPendingSteer();
+    const expected = pendingSteer?.correlationState === 'pending'
+      ? pendingSteer.expectedProviderMessage
+      : this.pendingProviderUserMessages.shift();
+    let acceptanceError: unknown;
+    if (pendingSteer?.correlationState === 'pending') {
+      pendingSteer.providerDisposition = 'accepted-awaiting-correlation';
+      pendingSteer.correlationState = 'settled';
+      this.clearPendingSteerUi(pendingSteer);
+      try {
+        await pendingSteer.coordinator.acceptSteerFromProviderEvent(
+          pendingSteer.inputRecordId,
+          chunk.itemId,
+        );
+      } catch (error) {
+        acceptanceError = error;
+      }
+    }
 
     const previousAssistant = this.activeStreamingAssistantMessage;
     const shouldDiscardPlaceholder = this.shouldDiscardPendingAssistantPlaceholder(previousAssistant);
@@ -1036,11 +1534,15 @@ export class InputController {
         content: persistedContent,
         displayContent,
         timestamp: Date.now(),
-        currentNote: expected?.currentNote,
+        linkedContentPath: expected?.linkedContentPath,
         images,
+        ...(chunk.itemId ? { userMessageId: chunk.itemId } : {}),
       };
       this.deps.state.addMessage(userMessage);
       this.deps.renderer.addMessage(userMessage);
+    }
+    if (pendingSteer?.correlationState === 'settled') {
+      this.releasePendingSteer(pendingSteer);
     }
 
     const assistantMessage: ChatMessage = {
@@ -1057,6 +1559,7 @@ export class InputController {
     this.deps.streamController.showThinkingIndicator();
     this.deps.state.responseStartTime = performance.now();
     this.awaitingProviderAssistantStart = true;
+    if (acceptanceError) throw toError(acceptanceError);
   }
 
   private async handleProviderAssistantMessageStart(): Promise<void> {
@@ -1103,6 +1606,45 @@ export class InputController {
     state.currentThinkingState = null;
   }
 
+  private rollbackFailedTurn(
+    messagesBeforeTurn: ChatMessage[],
+    hadPendingConversationSave: boolean,
+  ): void {
+    const { state, renderer } = this.deps;
+    const retainedMessageIds = new Set(messagesBeforeTurn.map(message => message.id));
+    for (const message of state.messages) {
+      if (!retainedMessageIds.has(message.id)) {
+        renderer.removeMessage(message.id);
+      }
+    }
+
+    state.messages = messagesBeforeTurn;
+    state.hasPendingConversationSave = hadPendingConversationSave;
+    this.resetTurnStreamingState();
+
+    if (messagesBeforeTurn.length === 0) {
+      this.deps.getWelcomeEl()?.removeClass('claudian-hidden');
+    }
+  }
+
+  private finishAcceptedMissingSession(streamGeneration: number): void {
+    if (this.deps.state.streamGeneration !== streamGeneration) return;
+    this.resetTurnStreamingState();
+  }
+
+  private resetTurnStreamingState(): void {
+    const { state, streamController } = this.deps;
+    streamController.hideThinkingIndicator();
+    state.isStreaming = false;
+    state.cancelRequested = false;
+    state.currentContentEl = null;
+    state.currentTextEl = null;
+    state.currentTextContent = '';
+    state.currentThinkingState = null;
+    state.responseStartTime = null;
+    this.deps.getSubagentManager().resetStreamingState();
+  }
+
   // ============================================
   // Title Generation
   // ============================================
@@ -1118,14 +1660,7 @@ export class InputController {
       return;
     }
 
-    if (!state.currentConversationId) {
-      const sessionId = this.getAgentService()?.getSessionId() ?? undefined;
-      const conversation = await plugin.createConversation({
-        providerId: this.getActiveProviderId(),
-        sessionId,
-      });
-      state.currentConversationId = conversation.id;
-    }
+    if (!state.currentConversationId) return;
 
     // Find first user message by role (not by index)
     const firstUserMsg = state.messages.find(m => m.role === 'user');
@@ -1134,7 +1669,9 @@ export class InputController {
       return;
     }
 
-    const userContent = firstUserMsg.displayContent || firstUserMsg.content;
+    const userContent = firstUserMsg.displayContent
+      ?? extractUserDisplayContent(firstUserMsg.content)
+      ?? firstUserMsg.content;
 
     // Set immediate fallback title
     const fallbackTitle = conversationController.generateFallbackTitle(userContent);
@@ -1186,6 +1723,34 @@ export class InputController {
     });
   }
 
+  private async ensureConversationShell(
+    token: LinkedContentSubmissionToken | null,
+  ): Promise<void> {
+    const { plugin, state } = this.deps;
+    if (state.currentConversationId) return;
+    if (!token) {
+      throw new Error('Missing Linked content submission for new Conversation');
+    }
+
+    const selectedModel = this.getAuxiliaryModel() ?? undefined;
+    const conversation = await plugin.createConversation({
+      providerId: this.getActiveProviderId(),
+      ...(selectedModel ? { selectedModel } : {}),
+      ...(token.path ? { linkedContentPath: token.path } : {}),
+    });
+    state.currentConversationId = conversation.id;
+
+    const settlement = this.deps.getLinkedContentController().commitSubmission(token);
+    for (const event of settlement.queuedEvents) {
+      if (event.kind !== 'rename') continue;
+      await plugin.rewriteLinkedContentPaths(
+        event.oldPath,
+        event.newPath,
+        event.includeDescendants,
+      );
+    }
+  }
+
   // ============================================
   // Streaming Control
   // ============================================
@@ -1194,10 +1759,17 @@ export class InputController {
     const { state, streamController } = this.deps;
     if (!state.isStreaming) return;
     state.cancelRequested = true;
-    // Restore queued message to input instead of discarding
-    this.restorePendingMessagesToInput();
-    this.getAgentService()?.cancel();
+    this.restoreQueuedMessageToInput();
+    this.clearCurrentPendingSteerUi();
+    this.getExecutionCoordinator()?.cancel();
     streamController.hideThinkingIndicator();
+  }
+
+  /** Cancels the active turn and waits for its cleanup and conversation persistence. */
+  async cancelStreamingAndWait(): Promise<void> {
+    const activeTurn = this.turnCoordinator.current;
+    this.cancelStreaming();
+    await activeTurn;
   }
 
   private syncScrollToBottomAfterRenderUpdates(): void {
@@ -1221,6 +1793,13 @@ export class InputController {
   async handleInstructionSubmit(rawInstruction: string): Promise<void> {
     const { plugin } = this.deps;
 
+    if (this.deps.ensureExecutionInitialized) {
+      const ready = await this.deps.ensureExecutionInitialized();
+      if (!ready) {
+        new Notice('Failed to initialize instruction refinement. Please try again.');
+        return;
+      }
+    }
     const instructionRefineService = this.deps.getInstructionRefineService();
     const instructionModeManager = this.deps.getInstructionModeManager();
 
@@ -1237,9 +1816,12 @@ export class InputController {
         {
           onAccept: (finalInstruction) => {
             void (async (): Promise<void> => {
-              const currentPrompt = plugin.settings.systemPrompt;
-              plugin.settings.systemPrompt = appendMarkdownSnippet(currentPrompt, finalInstruction);
-              await plugin.saveSettings();
+              await plugin.mutateSettings((settings) => {
+                settings.systemPrompt = appendMarkdownSnippet(
+                  settings.systemPrompt,
+                  finalInstruction,
+                );
+              });
 
               new Notice('Instruction added to custom system prompt');
               instructionModeManager?.clear();
@@ -1352,7 +1934,22 @@ export class InputController {
       headerEl.createDiv({ text: `Agent: ${approvalOptions.agentID}`, cls: 'claudian-ask-approval-agent' });
     }
 
-    headerEl.createDiv({ text: description, cls: 'claudian-ask-approval-desc' });
+    const descriptionEl = headerEl.createDiv({
+      text: description,
+      cls: 'claudian-ask-approval-desc',
+    });
+    descriptionEl.setAttribute('aria-label', `${toolName} approval details`);
+    descriptionEl.setAttribute('role', 'region');
+    descriptionEl.setAttribute('tabindex', '0');
+    descriptionEl.addEventListener('keydown', (event) => {
+      if (
+        event.key === 'ArrowDown'
+        || event.key === 'ArrowUp'
+        || event.key === 'Enter'
+      ) {
+        event.stopPropagation();
+      }
+    });
 
     const decisionOptions = approvalOptions?.decisionOptions ?? DEFAULT_APPROVAL_DECISION_OPTIONS;
     const optionDecisionMap = new Map<string, ApprovalDecision>();
@@ -1460,6 +2057,7 @@ export class InputController {
   async handleExitPlanMode(
     input: Record<string, unknown>,
     signal?: AbortSignal,
+    presentation?: ExitPlanModePresentationOptions,
   ): Promise<ExitPlanModeDecision | null> {
     const { state, streamController } = this.deps;
     const inputContainerEl = this.deps.getInputContainerEl();
@@ -1492,6 +2090,7 @@ export class InputController {
         signal,
         renderContent,
         planPathPrefix,
+        presentation,
       );
       this.pendingExitPlanModeInline = inline;
       try {
@@ -1508,6 +2107,22 @@ export class InputController {
     if (this.pendingApprovalInline) {
       this.pendingApprovalInline.destroy();
       this.pendingApprovalInline = null;
+    }
+  }
+
+  dismissProviderInteraction(kind: 'approval' | 'question' | 'plan-decision'): void {
+    if (kind === 'approval') {
+      this.dismissPendingApprovalPrompt();
+      return;
+    }
+    if (kind === 'question') {
+      this.pendingAskInline?.destroy();
+      this.pendingAskInline = null;
+      return;
+    }
+    if (this.pendingExitPlanModeInline) {
+      this.pendingExitPlanModeInline.destroy();
+      this.pendingExitPlanModeInline = null;
     }
   }
 
@@ -1604,9 +2219,19 @@ export class InputController {
     }
 
     switch (command.action) {
-      case 'clear':
-        await conversationController.createNew();
+      case 'clear': {
+        const handledByLayout = await this.deps.handleNewConversationCommand?.() ?? false;
+        if (handledByLayout) {
+          const linkedContent = this.deps.getLinkedContentController();
+          const linkedContentMode = linkedContent.getSnapshot().mode;
+          if (linkedContentMode === 'auto-draft' || linkedContentMode === 'explicit-draft') {
+            linkedContent.resetAutoDraft();
+          }
+        } else {
+          await conversationController.createNew();
+        }
         break;
+      }
       case 'add-dir': {
         const externalContextSelector = this.deps.getExternalContextSelector();
         if (!externalContextSelector) {
@@ -1634,6 +2259,24 @@ export class InputController {
           return;
         }
         await this.deps.onForkAll();
+        break;
+      }
+      case 'fast': {
+        try {
+          const toggled = await this.deps.toggleFastMode?.() ?? false;
+          if (!toggled) {
+            new Notice('Fast mode is not available for this model.');
+          }
+        } catch {
+          new Notice('Failed to toggle fast mode.');
+        }
+        break;
+      }
+      case 'instruction': {
+        const manager = this.deps.getInstructionModeManager();
+        if (!manager?.enter()) {
+          new Notice('Instruction mode is not available.');
+        }
         break;
       }
       default: {
@@ -1701,4 +2344,43 @@ export class InputController {
       }
     );
   }
+}
+
+function cloneChatTurnRequest(request: ChatTurnRequest): ChatTurnRequest {
+  return {
+    ...request,
+    externalContextPaths: request.externalContextPaths
+      ? [...request.externalContextPaths]
+      : undefined,
+    images: request.images ? [...request.images] : undefined,
+  };
+}
+
+function mergeQueuedChatTurns(
+  existing: { displayContent: string; request: ChatTurnRequest },
+  incoming: { displayContent: string; request: ChatTurnRequest },
+): { displayContent: string; request: ChatTurnRequest } {
+  const mergeText = (first: string, second: string) => (
+    [first, second].map(value => value.trim()).filter(Boolean).join('\n\n')
+  );
+  const externalContextPaths = Array.from(new Set([
+    ...(existing.request.externalContextPaths ?? []),
+    ...(incoming.request.externalContextPaths ?? []),
+  ]));
+  const images = [
+    ...(existing.request.images ?? []),
+    ...(incoming.request.images ?? []),
+  ];
+  return {
+    displayContent: mergeText(existing.displayContent, incoming.displayContent),
+    request: {
+      ...cloneChatTurnRequest(incoming.request),
+      linkedContentPath:
+        incoming.request.linkedContentPath ?? existing.request.linkedContentPath,
+      externalContextPaths:
+        externalContextPaths.length > 0 ? externalContextPaths : undefined,
+      images: images.length > 0 ? images : undefined,
+      text: mergeText(existing.request.text, incoming.request.text),
+    },
+  };
 }

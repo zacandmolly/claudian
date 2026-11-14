@@ -5,6 +5,8 @@ import type {
   ChatStateData,
   PendingToolCall,
   QueuedMessage,
+  TabAttention,
+  TabReviewOutcome,
   ThinkingBlockState,
   TodoItem,
   WriteEditState,
@@ -18,6 +20,7 @@ function createInitialState(): ChatStateData {
     streamGeneration: 0,
     isCreatingConversation: false,
     isSwitchingConversation: false,
+    isRewinding: false,
     hasPendingConversationSave: false,
     currentConversationId: null,
     queuedMessage: null,
@@ -34,7 +37,7 @@ function createInitialState(): ChatStateData {
     usage: null,
     ignoreUsageUpdates: false,
     currentTodos: null,
-    needsAttention: false,
+    attention: null,
     autoScrollEnabled: true, // Default; controllers will override based on settings
     responseStartTime: null,
     flavorTimerInterval: null,
@@ -47,6 +50,11 @@ function createInitialState(): ChatStateData {
 export class ChatState {
   private state: ChatStateData;
   private _callbacks: ChatStateCallbacks;
+  private readonly pendingActionIds = new Set<string>();
+  private pendingReview: {
+    outcome: TabReviewOutcome;
+    since: number;
+  } | null = null;
   private thinkingIndicatorTimeoutWindow: Window | null = null;
   private flavorTimerIntervalWindow: Window | null = null;
 
@@ -139,6 +147,15 @@ export class ChatState {
 
   set isSwitchingConversation(value: boolean) {
     this.state.isSwitchingConversation = value;
+  }
+
+  get isRewinding(): boolean {
+    return this.state.isRewinding;
+  }
+
+  set isRewinding(value: boolean) {
+    this.state.isRewinding = value;
+    this._callbacks.onRewindingStateChanged?.(value);
   }
 
   get hasPendingConversationSave(): boolean {
@@ -288,16 +305,75 @@ export class ChatState {
   }
 
   // ============================================
-  // Attention State (approval pending, error, etc.)
+  // Runtime-only Attention State
   // ============================================
 
-  get needsAttention(): boolean {
-    return this.state.needsAttention;
+  get attention(): TabAttention {
+    return this.state.attention;
   }
 
-  set needsAttention(value: boolean) {
-    this.state.needsAttention = value;
-    this._callbacks.onAttentionChanged?.(value);
+  get requiresAction(): boolean {
+    return this.state.attention?.kind === 'action-required';
+  }
+
+  beginActionRequired(interactionId: string): void {
+    if (this.pendingActionIds.has(interactionId)) return;
+
+    this.pendingActionIds.add(interactionId);
+    if (this.state.attention?.kind === 'review' && this.pendingReview === null) {
+      this.pendingReview = {
+        outcome: this.state.attention.outcome,
+        since: this.state.attention.since,
+      };
+    }
+    if (!this.requiresAction) {
+      this.setAttention({ kind: 'action-required', since: Date.now() });
+    }
+  }
+
+  endActionRequired(interactionId: string): void {
+    if (!this.pendingActionIds.delete(interactionId)) return;
+    if (this.pendingActionIds.size === 0 && this.requiresAction) {
+      const review = this.pendingReview;
+      this.pendingReview = null;
+      this.setAttention(review === null
+        ? null
+        : { kind: 'review', ...review });
+    }
+  }
+
+  markReviewRequired(outcome: TabReviewOutcome = 'completed'): void {
+    if (this.state.attention?.kind === 'review') {
+      if (this.state.attention.outcome === 'error' || outcome === 'completed') return;
+      this.setAttention({
+        kind: 'review',
+        outcome: 'error',
+        since: this.state.attention.since,
+      });
+      return;
+    }
+    if (this.requiresAction) {
+      if (this.pendingReview === null) {
+        this.pendingReview = { outcome, since: Date.now() };
+      } else if (outcome === 'error') {
+        this.pendingReview.outcome = 'error';
+      }
+      return;
+    }
+    this.setAttention({ kind: 'review', outcome, since: Date.now() });
+  }
+
+  acknowledgeReview(): void {
+    this.pendingReview = null;
+    if (this.state.attention?.kind === 'review') {
+      this.setAttention(null);
+    }
+  }
+
+  clearAttention(): void {
+    this.pendingActionIds.clear();
+    this.pendingReview = null;
+    this.setAttention(null);
   }
 
   // ============================================
@@ -420,6 +496,7 @@ export class ChatState {
     this.state.queuedMessage = null;
     this.usage = null;
     this.currentTodos = null;
+    this.clearAttention();
     this.autoScrollEnabled = true;
   }
 
@@ -430,6 +507,25 @@ export class ChatState {
 
   private getDefaultTimerWindow(): Window | null {
     return typeof window === 'undefined' ? null : window;
+  }
+
+  private setAttention(attention: TabAttention): void {
+    const current = this.state.attention;
+    if (
+      current === attention
+      || (current !== null
+        && attention !== null
+        && current.kind === attention.kind
+        && current.since === attention.since
+        && (current.kind !== 'review'
+          || attention.kind !== 'review'
+          || current.outcome === attention.outcome))
+    ) {
+      return;
+    }
+
+    this.state.attention = attention;
+    this._callbacks.onAttentionChanged?.(attention);
   }
 }
 

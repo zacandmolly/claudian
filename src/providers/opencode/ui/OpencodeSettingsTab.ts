@@ -1,20 +1,37 @@
 import * as fs from 'fs';
 import { Setting } from 'obsidian';
 
-import type { ProviderSettingsTabRenderer } from '../../../core/providers/types';
-import { renderEnvironmentSettingsSection } from '../../../features/settings/ui/EnvironmentSettingsSection';
+import { ProviderSettingsCoordinator } from '../../../core/providers/ProviderSettingsCoordinator';
+import type {
+  ProviderSettingsTabRenderer,
+  ProviderSettingsTabRendererContext,
+} from '../../../core/providers/types';
+import { t } from '../../../i18n/i18n';
+import { renderEnvironmentSettingsSection } from '../../../shared/settings/EnvironmentSettingsSection';
+import { renderHostnameCliPathSetting } from '../../../shared/settings/HostnameCliPathSetting';
+import { renderNativeMcpSettingsSection } from '../../../shared/settings/NativeMcpSettingsSection';
+import { renderProviderEnablementSetting } from '../../../shared/settings/ProviderEnablementSetting';
+import {
+  renderLastEnabledProviderWarning,
+  renderProviderModelEnablementWarning,
+} from '../../../shared/settings/ProviderModelEnablementWarning';
+import {
+  type ProviderModelPickerModel,
+  type ProviderModelPickerState,
+  renderProviderModelPicker,
+} from '../../../shared/settings/ProviderModelPicker';
 import { getHostnameKey } from '../../../utils/env';
-import { expandHomePath } from '../../../utils/path';
+import { normalizeConfiguredCliPath } from '../../../utils/path';
 import { maybeGetOpencodeWorkspaceServices } from '../app/OpencodeWorkspaceServices';
 import { clearOpencodeDiscoveryState } from '../discoveryState';
 import { sameStringList } from '../internal/compareCollections';
+import { OpencodeMetadataService } from '../metadata/OpencodeMetadataService';
 import {
   buildOpencodeBaseModels,
   encodeOpencodeModelId,
   type OpencodeDiscoveredModel,
   splitOpencodeModelLabel,
 } from '../models';
-import { OpencodeChatRuntime } from '../runtime/OpencodeChatRuntime';
 import {
   getOpencodeProviderSettings,
   normalizeOpencodeVisibleModels,
@@ -23,570 +40,94 @@ import {
 } from '../settings';
 import { OpencodeAgentSettings } from './OpencodeAgentSettings';
 
-const ALL_PROVIDERS_KEY = 'all';
-const OPENCODE_METADATA_WARMUP_DB = ':memory:';
-
-interface EnrichedModel {
-  description: string;
-  isAvailable: boolean;
-  modelLabel: string;
-  providerKey: string;
-  providerLabel: string;
-  rawId: string;
-}
-
 export const opencodeSettingsTabRenderer: ProviderSettingsTabRenderer = {
   render(container, context) {
     const opencodeWorkspace = maybeGetOpencodeWorkspaceServices();
     const settingsBag = context.plugin.settings as unknown as Record<string, unknown>;
-    const opencodeSettings = getOpencodeProviderSettings(settingsBag);
     const hostnameKey = getHostnameKey();
 
     new Setting(container).setName('Setup').setHeading();
 
-    new Setting(container)
-      .setName('Enable OpenCode')
-      .setDesc('Launch `opencode acp` as a provider.')
-      .addToggle((toggle) =>
-        toggle
-          .setValue(opencodeSettings.enabled)
-          .onChange(async (value) => {
-            updateOpencodeProviderSettings(settingsBag, { enabled: value });
-            await context.plugin.saveSettings();
-            context.refreshModelSelectors();
-          })
-      );
+    renderProviderEnablementSetting({
+      container,
+      description: t('settings.providerEnablement.desc', { provider: 'OpenCode' }),
+      getValue: () => getOpencodeProviderSettings(settingsBag).enabled,
+      name: t('settings.providerEnablement.name', { provider: 'OpenCode' }),
+      onChange: async (value) => {
+        if (!ProviderSettingsCoordinator.canApplyProviderEnablement(
+          settingsBag,
+          'opencode',
+          value,
+        )) {
+          lastProviderWarning.showFor();
+          return;
+        }
 
-    const cliPathSetting = new Setting(container)
-      .setName('CLI path')
-      .setDesc('Optional absolute path to the OpenCode CLI for this computer. Leave empty to use `opencode` from PATH.');
-
-    const validationEl = container.createDiv({
-      cls: 'claudian-cli-path-validation claudian-setting-validation claudian-setting-validation-error claudian-hidden',
+        let accepted = true;
+        await context.plugin.runProviderExecutionTransition(['opencode'], async () => {
+          await context.plugin.mutateSettings((settings) => {
+            accepted = ProviderSettingsCoordinator.applyProviderEnablement(
+              settings,
+              'opencode',
+              value,
+            );
+          });
+        });
+        if (accepted) {
+          lastProviderWarning.hide();
+        } else {
+          lastProviderWarning.showFor();
+        }
+        modelWarning.context.notifyProviderModelOptionsChanged('opencode');
+      },
     });
 
-    const validatePath = (value: string): string | null => {
-      const trimmed = value.trim();
-      if (!trimmed) {
-        return null;
-      }
+    const lastProviderWarning = renderLastEnabledProviderWarning(container);
 
-      const expandedPath = expandHomePath(trimmed);
-      if (!fs.existsSync(expandedPath)) {
-        return 'Path does not exist';
-      }
+    const modelWarning = renderProviderModelEnablementWarning(container, context, {
+      getHasEnabledModels: () => getOpencodeProviderSettings(settingsBag).visibleModels.length > 0,
+      getIsEnabled: () => getOpencodeProviderSettings(settingsBag).enabled,
+      providerId: 'opencode',
+      providerName: 'OpenCode',
+    });
 
-      const stat = fs.statSync(expandedPath);
-      if (!stat.isFile()) {
-        return 'Path must point to a file';
-      }
-
-      return null;
-    };
-
-    const updateCliPathValidation = (value: string, inputEl?: HTMLInputElement): boolean => {
-      const error = validatePath(value);
-      if (error) {
-        validationEl.setText(error);
-        validationEl.toggleClass('claudian-hidden', false);
-        if (inputEl) {
-          inputEl.toggleClass('claudian-input-error', true);
-        }
-        return false;
-      }
-
-      validationEl.toggleClass('claudian-hidden', true);
-      if (inputEl) {
-        inputEl.toggleClass('claudian-input-error', false);
-      }
-      return true;
-    };
-
-    const cliPathsByHost = { ...opencodeSettings.cliPathsByHost };
-    const currentValue = opencodeSettings.cliPathsByHost[hostnameKey] || '';
-    let cliPathInputEl: HTMLInputElement | null = null;
-
-    const persistCliPath = async (value: string): Promise<boolean> => {
-      const isValid = updateCliPathValidation(value, cliPathInputEl ?? undefined);
-      if (!isValid) {
-        return false;
-      }
-
-      const trimmed = value.trim();
-      if (trimmed) {
-        cliPathsByHost[hostnameKey] = trimmed;
-      } else {
-        delete cliPathsByHost[hostnameKey];
-      }
-
-      updateOpencodeProviderSettings(settingsBag, { cliPathsByHost: { ...cliPathsByHost } });
-      clearOpencodeDiscoveryState(settingsBag);
-      await context.plugin.saveSettings();
-      opencodeWorkspace?.cliResolver?.reset();
-      await recycleOpencodeRuntime();
-      return true;
-    };
-
-    const recycleOpencodeRuntime = async (): Promise<void> => {
-      for (const view of context.plugin.getAllViews()) {
-        const tabManager = view.getTabManager();
-        if (tabManager?.broadcastToProviderTabs) {
-          await tabManager.broadcastToProviderTabs('opencode', (service) => Promise.resolve(service.cleanup()));
+    renderHostnameCliPathSetting({
+      container,
+      description: 'Optional absolute path to the OpenCode CLI for this computer. Leave empty to use `opencode` from PATH.',
+      getValue: () => getOpencodeProviderSettings(settingsBag).cliPathsByHost[hostnameKey] || '',
+      name: 'CLI path',
+      onChange: async (value) => {
+        const cliPathsByHost = {
+          ...getOpencodeProviderSettings(settingsBag).cliPathsByHost,
+        };
+        if (value) {
+          cliPathsByHost[hostnameKey] = value;
         } else {
-          await tabManager?.broadcastToAllTabs(
-            (service) => Promise.resolve(service.cleanup()),
-          );
+          delete cliPathsByHost[hostnameKey];
         }
-        view.invalidateProviderCommandCaches?.(['opencode']);
-        view.refreshModelSelector?.();
-      }
-    };
 
-    cliPathSetting.addText((text) => {
-      text
-        .setPlaceholder(process.platform === 'win32'
-          ? 'C:\\Users\\you\\AppData\\Roaming\\npm\\opencode.cmd'
-          : '/usr/local/bin/opencode')
-        .setValue(currentValue)
-        .onChange(async (value) => {
-          await persistCliPath(value);
-        });
-
-      text.inputEl.addClass('claudian-settings-cli-path-input');
-      cliPathInputEl = text.inputEl;
-
-      updateCliPathValidation(currentValue, text.inputEl);
+        await context.plugin.applyProviderRuntimeSettings(
+          ['opencode'],
+          (settings) => {
+            updateOpencodeProviderSettings(settings, { cliPathsByHost });
+            clearOpencodeDiscoveryState(settings);
+          },
+          () => opencodeWorkspace?.cliResolver?.reset(),
+        );
+      },
+      placeholder: process.platform === 'win32'
+        ? 'C:\\Users\\you\\AppData\\Roaming\\npm\\opencode.cmd'
+        : '/usr/local/bin/opencode',
+      validate: validateCliPath,
     });
 
     new Setting(container).setName('Models').setHeading();
+    renderOpencodeModelPicker(container, modelWarning.context, settingsBag);
 
-    new Setting(container)
-      .setName('Visible models')
-      .setDesc('Choose which OpenCode models appear in the chat selector. Filter by provider or type to search. The current session model stays pinned even if it is not selected here.');
+    new Setting(container).setName(t('settings.agentSkills.sectionTitle')).setHeading();
+    context.renderAgentSkillSettings(container, 'opencode');
 
-    const pickerEl = container.createDiv({ cls: 'claudian-opencode-model-picker' });
-
-    let searchQuery = '';
-    let providerFilter = ALL_PROVIDERS_KEY;
-
-    const summaryEl = pickerEl.createDiv({ cls: 'claudian-opencode-model-picker-summary' });
-    const selectedEl = pickerEl.createDiv({ cls: 'claudian-opencode-model-picker-selected' });
-    const catalogEl = pickerEl.createEl('details', { cls: 'claudian-opencode-model-picker-catalog' });
-    catalogEl.open = getOpencodeProviderSettings(settingsBag).visibleModels.length === 0;
-    const catalogSummaryEl = catalogEl.createEl('summary', {
-      cls: 'claudian-opencode-model-picker-catalog-summary',
-    });
-    catalogSummaryEl.createSpan({
-      cls: 'claudian-opencode-model-picker-catalog-caret',
-      text: '▸',
-    });
-    catalogSummaryEl.createSpan({
-      cls: 'claudian-opencode-model-picker-catalog-title',
-      text: 'Browse models',
-    });
-    const catalogSummaryCountEl = catalogSummaryEl.createSpan({
-      cls: 'claudian-opencode-model-picker-catalog-count',
-    });
-
-    const controlsEl = catalogEl.createDiv({ cls: 'claudian-opencode-model-picker-controls' });
-
-    const searchInput = controlsEl.createEl('input', {
-      cls: 'claudian-opencode-model-picker-search',
-      type: 'search',
-    });
-    searchInput.placeholder = 'Filter by model, provider, or ID…';
-    searchInput.addEventListener('input', () => {
-      searchQuery = searchInput.value.trim().toLowerCase();
-      renderList();
-    });
-
-    const providerSelectEl = controlsEl.createEl('select', {
-      cls: 'claudian-opencode-model-picker-provider',
-    });
-    providerSelectEl.addEventListener('change', () => {
-      providerFilter = providerSelectEl.value;
-      renderList();
-    });
-
-    const listEl = catalogEl.createDiv({ cls: 'claudian-opencode-model-picker-list' });
-    let loadingModelCatalog = false;
-    let modelCatalogLoadFailed = false;
-
-    const getEnrichedModels = (): EnrichedModel[] => {
-      const current = getOpencodeProviderSettings(settingsBag);
-      return buildEnrichedModels(current.discoveredModels, current.visibleModels);
-    };
-
-    const filterModels = (models: EnrichedModel[]): EnrichedModel[] => {
-      return models.filter((model) => {
-        if (providerFilter !== ALL_PROVIDERS_KEY && model.providerKey !== providerFilter) {
-          return false;
-        }
-
-        if (!searchQuery) {
-          return true;
-        }
-
-        return (
-          model.rawId.toLowerCase().includes(searchQuery)
-          || model.modelLabel.toLowerCase().includes(searchQuery)
-          || model.providerLabel.toLowerCase().includes(searchQuery)
-          || model.description.toLowerCase().includes(searchQuery)
-        );
-      });
-    };
-
-    const persistVisibleModels = async (visibleModels: string[]): Promise<void> => {
-      const currentVisibleModels = getOpencodeProviderSettings(settingsBag).visibleModels;
-      const normalized = normalizeOpencodeVisibleModels(
-        visibleModels,
-        getOpencodeProviderSettings(settingsBag).discoveredModels,
-      );
-      if (sameStringList(currentVisibleModels, normalized)) {
-        return;
-      }
-
-      updateOpencodeProviderSettings(settingsBag, { visibleModels: normalized });
-      await context.plugin.saveSettings();
-      renderAll();
-      context.refreshModelSelectors();
-    };
-
-    const persistModelMetadata = async (rawId: string): Promise<void> => {
-      const runtime = new OpencodeChatRuntime(context.plugin);
-      try {
-        runtime.syncConversationState({
-          providerState: { databasePath: OPENCODE_METADATA_WARMUP_DB },
-          sessionId: null,
-        });
-        const loaded = await runtime.warmModelMetadata(encodeOpencodeModelId(rawId));
-        if (loaded) {
-          context.refreshModelSelectors();
-        }
-      } catch {
-        // Metadata warmup is opportunistic; the first chat turn can still discover it.
-      } finally {
-        runtime.cleanup();
-      }
-    };
-
-    const persistModelAliases = async (modelAliases: Record<string, string>): Promise<void> => {
-      updateOpencodeProviderSettings(settingsBag, { modelAliases });
-      await context.plugin.saveSettings();
-      renderSelected();
-      context.refreshModelSelectors();
-    };
-
-    const renderSummary = (): void => {
-      summaryEl.empty();
-      const current = getOpencodeProviderSettings(settingsBag);
-      const enriched = getEnrichedModels();
-      const providerCount = new Set(enriched.map((model) => model.providerKey)).size;
-      const providerWord = providerCount === 1 ? 'provider' : 'providers';
-
-      summaryEl.createSpan({ text: 'Visible: ' });
-      summaryEl.createSpan({
-        cls: 'claudian-opencode-model-picker-summary-value',
-        text: String(current.visibleModels.length),
-      });
-      summaryEl.createSpan({
-        text: ` of ${current.discoveredModels.length} discovered • ${providerCount} ${providerWord}`,
-      });
-
-      let catalogSummary = 'No models discovered yet';
-      if (loadingModelCatalog) {
-        catalogSummary = 'Loading models...';
-      } else if (current.discoveredModels.length > 0) {
-        catalogSummary = `${current.discoveredModels.length} available`;
-      }
-      catalogSummaryCountEl.setText(catalogSummary);
-    };
-
-    const renderSelected = (): void => {
-      selectedEl.empty();
-      const current = getOpencodeProviderSettings(settingsBag);
-      if (current.visibleModels.length === 0) {
-        selectedEl.toggleClass('claudian-hidden', true);
-        return;
-      }
-
-      selectedEl.toggleClass('claudian-hidden', false);
-      const enrichedByRawId = new Map(
-        getEnrichedModels().map((model) => [model.rawId, model] as const),
-      );
-
-      const headerEl = selectedEl.createDiv({ cls: 'claudian-opencode-model-picker-selected-header' });
-      headerEl.createEl('span', {
-        cls: 'claudian-opencode-model-picker-selected-label',
-        text: `Selected (${current.visibleModels.length})`,
-      });
-      const clearAllBtn = headerEl.createEl('button', {
-        cls: 'claudian-opencode-model-picker-selected-clear',
-        text: 'Clear all',
-      });
-      clearAllBtn.setAttribute('aria-label', 'Clear all selected models');
-      clearAllBtn.addEventListener('click', () => {
-        void persistVisibleModels([]);
-      });
-
-      const rowsEl = selectedEl.createDiv({ cls: 'claudian-opencode-model-picker-selected-rows' });
-
-      for (const rawId of current.visibleModels) {
-        const enriched = enrichedByRawId.get(rawId);
-        const defaultLabel = enriched
-          ? `${enriched.providerLabel}/${enriched.modelLabel}`
-          : rawId;
-
-        const rowEl = rowsEl.createDiv({ cls: 'claudian-opencode-model-picker-selected-row' });
-        if (enriched && !enriched.isAvailable) {
-          rowEl.classList.add('claudian-opencode-model-picker-selected-row--unavailable');
-        }
-
-        const infoEl = rowEl.createDiv({ cls: 'claudian-opencode-model-picker-selected-info' });
-        const titleEl = infoEl.createDiv({ cls: 'claudian-opencode-model-picker-selected-title' });
-        if (enriched) {
-          titleEl.createEl('span', {
-            cls: 'claudian-opencode-model-picker-selected-badge',
-            text: enriched.providerLabel,
-          });
-          titleEl.createEl('span', {
-            cls: 'claudian-opencode-model-picker-selected-name',
-            text: enriched.modelLabel,
-          });
-        } else {
-          titleEl.createEl('span', {
-            cls: 'claudian-opencode-model-picker-selected-name',
-            text: rawId,
-          });
-        }
-
-        if (enriched && !enriched.isAvailable) {
-          infoEl.createEl('div', {
-            cls: 'claudian-opencode-model-picker-selected-unavailable',
-            text: 'Not currently reported by OpenCode',
-          });
-        }
-
-        infoEl.createEl('div', {
-          cls: 'claudian-opencode-model-picker-selected-id',
-          text: rawId,
-        });
-
-        const controlsEl = rowEl.createDiv({ cls: 'claudian-opencode-model-picker-selected-controls' });
-        const aliasInput = controlsEl.createEl('input', {
-          cls: 'claudian-opencode-model-picker-selected-alias',
-          type: 'text',
-        });
-        aliasInput.placeholder = defaultLabel;
-        aliasInput.value = current.modelAliases[rawId] ?? '';
-        aliasInput.setAttribute('aria-label', `Alias for ${defaultLabel}`);
-        aliasInput.title = 'Custom label shown in the model selector. Leave empty to use the default.';
-
-        const commitAlias = (): void => {
-          const latest = getOpencodeProviderSettings(settingsBag);
-          const existing = latest.modelAliases[rawId] ?? '';
-          const next = aliasInput.value.trim();
-          if (next === existing) {
-            aliasInput.value = existing;
-            return;
-          }
-
-          const nextAliases = { ...latest.modelAliases };
-          if (next) {
-            nextAliases[rawId] = next;
-          } else {
-            delete nextAliases[rawId];
-          }
-          void persistModelAliases(nextAliases);
-        };
-
-        aliasInput.addEventListener('blur', commitAlias);
-        aliasInput.addEventListener('keydown', (event) => {
-          if (event.key === 'Enter') {
-            event.preventDefault();
-            aliasInput.blur();
-          } else if (event.key === 'Escape') {
-            event.preventDefault();
-            aliasInput.value = getOpencodeProviderSettings(settingsBag).modelAliases[rawId] ?? '';
-            aliasInput.blur();
-          }
-        });
-
-        const removeBtn = controlsEl.createEl('button', {
-          cls: 'claudian-opencode-model-picker-selected-remove',
-          text: '×',
-        });
-        removeBtn.setAttribute('aria-label', `Remove ${defaultLabel}`);
-        removeBtn.addEventListener('click', () => {
-          void persistVisibleModels(current.visibleModels.filter((entry) => entry !== rawId));
-        });
-      }
-    };
-
-    const renderProviderSelect = (): void => {
-      const enriched = getEnrichedModels();
-      const providers = new Map<string, { count: number; label: string }>();
-      for (const model of enriched) {
-        const existing = providers.get(model.providerKey);
-        if (existing) {
-          existing.count += 1;
-        } else {
-          providers.set(model.providerKey, { count: 1, label: model.providerLabel });
-        }
-      }
-
-      providerSelectEl.empty();
-      providerSelectEl.createEl('option', {
-        text: `All providers (${enriched.length})`,
-        value: ALL_PROVIDERS_KEY,
-      });
-
-      const sortedProviders = Array.from(providers.entries())
-        .sort(([, left], [, right]) => left.label.localeCompare(right.label));
-      for (const [key, { count, label }] of sortedProviders) {
-        providerSelectEl.createEl('option', {
-          text: `${label} (${count})`,
-          value: key,
-        });
-      }
-
-      if (providerFilter !== ALL_PROVIDERS_KEY && !providers.has(providerFilter)) {
-        providerFilter = ALL_PROVIDERS_KEY;
-      }
-      providerSelectEl.value = providerFilter;
-    };
-
-    const renderList = (): void => {
-      listEl.empty();
-      const current = getOpencodeProviderSettings(settingsBag);
-      const selectedIds = new Set(current.visibleModels);
-      const enriched = getEnrichedModels();
-      const filtered = filterModels(enriched);
-
-      if (filtered.length === 0) {
-        const emptyEl = listEl.createDiv({ cls: 'claudian-opencode-model-picker-empty' });
-        let emptyText = 'No models match your filter.';
-        if (loadingModelCatalog) {
-          emptyText = 'Loading OpenCode model catalog...';
-        } else if (modelCatalogLoadFailed) {
-          emptyText = 'Could not load the OpenCode model catalog. Check the CLI path and login state, then expand this section again.';
-        } else if (enriched.length === 0) {
-          emptyText = 'Start OpenCode once to load its model catalog. Claudian will then let you pick visible models.';
-        }
-        emptyEl.setText(emptyText);
-        return;
-      }
-
-      for (const model of filtered) {
-        const rowEl = listEl.createEl('label', { cls: 'claudian-opencode-model-picker-row' });
-        const isSelected = selectedIds.has(model.rawId);
-        if (isSelected) {
-          rowEl.classList.add('claudian-opencode-model-picker-row--selected');
-        }
-        rowEl.title = model.rawId;
-
-        const checkboxEl = rowEl.createEl('input', { type: 'checkbox' });
-        checkboxEl.checked = isSelected;
-        checkboxEl.addEventListener('change', () => {
-          const currentVisibleModels = getOpencodeProviderSettings(settingsBag).visibleModels;
-          const next = checkboxEl.checked
-            ? [...currentVisibleModels, model.rawId]
-            : currentVisibleModels.filter((id) => id !== model.rawId);
-          void (async () => {
-            await persistVisibleModels(next);
-            if (checkboxEl.checked) {
-              await persistModelMetadata(model.rawId);
-            }
-          })();
-        });
-
-        const textEl = rowEl.createDiv({ cls: 'claudian-opencode-model-picker-row-text' });
-
-        const headerEl = textEl.createDiv({ cls: 'claudian-opencode-model-picker-row-header' });
-        headerEl.createEl('span', {
-          cls: 'claudian-opencode-model-picker-row-name',
-          text: model.modelLabel,
-        });
-        const badgeEl = headerEl.createEl('span', {
-          cls: 'claudian-opencode-model-picker-row-badge',
-          text: model.providerLabel,
-        });
-        if (!model.isAvailable) {
-          badgeEl.classList.add('claudian-opencode-model-picker-row-badge--unavailable');
-          badgeEl.setText('Unavailable');
-          badgeEl.title = 'Configured model not currently reported by OpenCode';
-        }
-
-        textEl.createDiv({
-          cls: 'claudian-opencode-model-picker-row-meta',
-          text: model.rawId,
-        });
-
-        if (model.description) {
-          textEl.createDiv({
-            cls: 'claudian-opencode-model-picker-row-desc',
-            text: model.description,
-          });
-        }
-
-      }
-    };
-
-    const renderAll = (): void => {
-      renderSummary();
-      renderSelected();
-      renderProviderSelect();
-      renderList();
-    };
-
-    renderAll();
-
-    const loadModelCatalog = async (): Promise<void> => {
-      if (loadingModelCatalog || getOpencodeProviderSettings(settingsBag).discoveredModels.length > 0) {
-        return;
-      }
-
-      loadingModelCatalog = true;
-      modelCatalogLoadFailed = false;
-      renderAll();
-
-      const runtime = new OpencodeChatRuntime(context.plugin);
-      try {
-        runtime.syncConversationState({
-          providerState: { databasePath: OPENCODE_METADATA_WARMUP_DB },
-          sessionId: null,
-        });
-        const loaded = await runtime.ensureReady({ allowSessionCreation: true });
-        modelCatalogLoadFailed = !loaded || getOpencodeProviderSettings(settingsBag).discoveredModels.length === 0;
-        if (!modelCatalogLoadFailed) {
-          context.refreshModelSelectors();
-        }
-      } catch {
-        modelCatalogLoadFailed = true;
-      } finally {
-        loadingModelCatalog = false;
-        runtime.cleanup();
-        renderAll();
-      }
-    };
-
-    catalogEl.addEventListener('toggle', () => {
-      if (catalogEl.open) {
-        void loadModelCatalog();
-      }
-    });
-    if (catalogEl.open) {
-      void loadModelCatalog();
-    }
-
-    new Setting(container).setName('Commands and skills').setHeading();
-
-    const commandsDesc = container.createDiv({ cls: 'claudian-sp-settings-desc' });
-    commandsDesc.createEl('p', {
-      cls: 'setting-item-description',
-      text: 'OpenCode can auto-detect vault-level Claude slash commands from .claude/commands/ and skills from .claude/skills/, .codex/skills/, and .agents/skills/. Manage those entries in the Claude or Codex settings tab. This setting only hides entries from the OpenCode dropdown.',
-    });
-
+    new Setting(container).setName('Commands').setHeading();
     context.renderHiddenProviderCommandSetting(container, 'opencode', {
       name: 'Hidden Commands and Skills',
       desc: 'Hide specific OpenCode commands and skills from the dropdown. Enter names without the leading slash, one per line.',
@@ -608,11 +149,21 @@ export const opencodeSettingsTabRenderer: ProviderSettingsTabRenderer = {
         opencodeWorkspace.agentStorage,
         context.plugin.app,
         async () => {
-          await opencodeWorkspace.refreshAgentMentions?.();
-          await recycleOpencodeRuntime();
+          await context.plugin.runProviderExecutionTransition(['opencode'], async () => {
+            await opencodeWorkspace.refreshAgentMentions?.();
+          });
         },
       );
     }
+
+    renderNativeMcpSettingsSection(container, {
+      descriptionAfterCommand: ' and they will be available in Claudian. ',
+      descriptionBeforeCommand: 'OpenCode manages MCP servers through its own CLI. Configure them with ',
+      documentationLabel: 'Learn more',
+      documentationUrl: 'https://opencode.ai/docs/mcp-servers/',
+      heading: t('settings.mcpServers.name'),
+      setupCommand: 'opencode mcp add',
+    });
 
     renderEnvironmentSettingsSection({
       container,
@@ -627,24 +178,123 @@ export const opencodeSettingsTabRenderer: ProviderSettingsTabRenderer = {
   },
 };
 
-function buildEnrichedModels(
+function renderOpencodeModelPicker(
+  container: HTMLElement,
+  context: ProviderSettingsTabRendererContext,
+  settingsBag: Record<string, unknown>,
+): void {
+  const getState = (): ProviderModelPickerState => {
+    const current = getOpencodeProviderSettings(settingsBag);
+    return {
+      aliases: current.modelAliases,
+      discoveredCount: current.discoveredModels.length,
+      models: buildOpencodePickerModels(current.discoveredModels, current.visibleModels),
+      selectedIds: current.visibleModels,
+    };
+  };
+
+  const warmModelMetadata = async (rawId: string): Promise<void> => {
+    const workspaceService = maybeGetOpencodeWorkspaceServices()?.metadataService;
+    const metadataService = workspaceService
+      ?? new OpencodeMetadataService(context.plugin);
+    try {
+      if (
+        await metadataService.warmModelMetadata(encodeOpencodeModelId(rawId))
+      ) {
+        context.notifyProviderModelOptionsChanged('opencode');
+      }
+    } catch {
+      // Metadata warmup is opportunistic; the first chat turn can still discover it.
+    } finally {
+      if (!workspaceService) await metadataService.dispose();
+    }
+  };
+
+  renderProviderModelPicker({
+    container,
+    emptyCatalogText: 'Start OpenCode once to load its model catalog. Claudian will then let you pick visible models.',
+    failedCatalogText: 'Could not load the OpenCode model catalog. Check the CLI path and login state, then try again.',
+    getState,
+    async loadCatalog() {
+      const workspaceService = maybeGetOpencodeWorkspaceServices()?.metadataService;
+      const metadataService = workspaceService
+        ?? new OpencodeMetadataService(context.plugin);
+      try {
+        const loaded = await metadataService.loadCatalog();
+        const discoveredCount = getOpencodeProviderSettings(settingsBag).discoveredModels.length;
+        if (!loaded) {
+          return 'failed';
+        }
+        if (discoveredCount > 0) {
+          context.notifyProviderModelOptionsChanged('opencode');
+          return 'loaded';
+        }
+        return 'empty';
+      } catch {
+        return 'failed';
+      } finally {
+        if (!workspaceService) await metadataService.dispose();
+      }
+    },
+    loadCatalogOnRender: true,
+    loadingCatalogText: 'Loading OpenCode model catalog...',
+    modifier: 'opencode',
+    async onAliasesChange(modelAliases) {
+      await context.plugin.mutateSettings((settings) => {
+        updateOpencodeProviderSettings(settings, { modelAliases });
+      });
+      context.notifyProviderModelOptionsChanged('opencode');
+    },
+    onModelSelected: async (model) => warmModelMetadata(model.id),
+    async onSelectedIdsChange(visibleModels) {
+      const current = getOpencodeProviderSettings(settingsBag);
+      const normalized = normalizeOpencodeVisibleModels(visibleModels, current.discoveredModels);
+      if (sameStringList(current.visibleModels, normalized)) {
+        return;
+      }
+
+      await context.plugin.mutateSettings((settings) => {
+        updateOpencodeProviderSettings(settings, { visibleModels: normalized });
+      });
+      context.notifyProviderModelOptionsChanged('opencode');
+    },
+    providerName: 'OpenCode',
+  });
+}
+
+function validateCliPath(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const expandedPath = normalizeConfiguredCliPath(trimmed);
+  if (!fs.existsSync(expandedPath)) {
+    return 'Path does not exist';
+  }
+  if (!fs.statSync(expandedPath).isFile()) {
+    return 'Path must point to a file';
+  }
+  return null;
+}
+
+function buildOpencodePickerModels(
   discoveredModels: OpencodeDiscoveredModel[],
   visibleModels: string[],
-): EnrichedModel[] {
-  const enriched: EnrichedModel[] = [];
+): ProviderModelPickerModel[] {
+  const models: ProviderModelPickerModel[] = [];
   const discoveredIds = new Set<string>();
-  const baseModels = buildOpencodeBaseModels(discoveredModels);
 
-  for (const model of baseModels) {
+  for (const model of buildOpencodeBaseModels(discoveredModels)) {
     const { modelLabel, providerLabel } = splitOpencodeModelLabel(model.label || model.rawId);
     discoveredIds.add(model.rawId);
-    enriched.push({
+    models.push({
       description: model.description ?? '',
+      id: model.rawId,
       isAvailable: true,
-      modelLabel,
+      name: modelLabel,
       providerKey: providerLabel.toLowerCase(),
       providerLabel,
-      rawId: model.rawId,
     });
   }
 
@@ -654,21 +304,21 @@ function buildEnrichedModels(
     }
 
     const { modelLabel, providerLabel } = splitOpencodeModelLabel(rawId);
-    enriched.push({
-      description: '',
+    models.push({
+      id: rawId,
       isAvailable: false,
-      modelLabel,
+      name: modelLabel,
       providerKey: providerLabel.toLowerCase(),
       providerLabel,
-      rawId,
+      unavailableMessage: 'Not currently reported by OpenCode',
     });
   }
 
-  return enriched.sort((left, right) => {
-    const providerCmp = left.providerLabel.localeCompare(right.providerLabel);
+  return models.sort((left, right) => {
+    const providerCmp = (left.providerLabel ?? '').localeCompare(right.providerLabel ?? '');
     if (providerCmp !== 0) {
       return providerCmp;
     }
-    return left.modelLabel.localeCompare(right.modelLabel);
+    return left.name.localeCompare(right.name);
   });
 }

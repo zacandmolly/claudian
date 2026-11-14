@@ -1,11 +1,15 @@
-import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 
 import { extractResolvedAnswersFromResultText } from '../../../core/tools/toolInput';
 import { isWriteEditTool, TOOL_ASK_USER_QUESTION } from '../../../core/tools/toolNames';
-import type { ChatMessage, ContentBlock, ToolCallInfo } from '../../../core/types';
+import type { ChatMessage, ContentBlock, ImageAttachment, ToolCallInfo } from '../../../core/types';
 import { extractUserQuery } from '../../../utils/context';
 import { extractDiffData } from '../../../utils/diff';
+import {
+  buildImageAttachmentFromBase64,
+  parseImageDataUri,
+} from '../../../utils/imageAttachment';
+import { encodeOpencodeModelId } from '../models';
 import {
   normalizeOpencodeToolInput,
   normalizeOpencodeToolName,
@@ -13,8 +17,12 @@ import {
 } from '../normalization/opencodeToolNormalization';
 import { resolveExistingOpencodeDatabasePath } from '../runtime/OpencodePaths';
 import type { OpencodeProviderState } from '../types';
+import {
+  loadOpencodeSessionRows,
+  type StoredRow,
+} from './OpencodeSqliteReader';
 
-type StoredRow = Record<string, unknown>;
+export { OPENCODE_MESSAGE_ROW_SQL } from './OpencodeSqliteReader';
 
 interface StoredMessage {
   info: StoredRow;
@@ -26,17 +34,6 @@ interface OpencodeHydrationDiagnosticContext {
   sessionId?: string;
 }
 
-interface SqliteModule {
-  DatabaseSync: new (location: string, options?: Record<string, unknown>) => {
-    close(): void;
-    prepare(sql: string): {
-      all(...params: unknown[]): StoredRow[];
-    };
-  };
-}
-
-export const OPENCODE_MESSAGE_ROW_SQL = buildOpencodeMessageRowsSql('?');
-const OPENCODE_PART_ROW_SQL = buildOpencodePartRowsSql('?');
 const OPENCODE_HYDRATION_DIAGNOSTIC_ID_PREFIX = 'opencode-hydration-error';
 
 export async function loadOpencodeSessionMessages(
@@ -61,6 +58,28 @@ export async function loadOpencodeSessionMessages(
     hydrateStoredMessages(rows.messageRows, rows.partRows),
     { databasePath, sessionId },
   );
+}
+
+export async function loadOpencodeSessionModel(
+  sessionId: string,
+  providerState?: OpencodeProviderState,
+): Promise<string | null> {
+  const databasePath = resolveExistingOpencodeDatabasePath(providerState?.databasePath);
+  if (!databasePath || databasePath === ':memory:' || !fs.existsSync(databasePath)) {
+    return null;
+  }
+
+  const rows = await loadOpencodeSessionRows(databasePath, sessionId);
+  let rawModelId: string | null = null;
+  for (const row of rows?.messageRows ?? []) {
+    const data = parseJsonObject(row.data);
+    const providerId = getString(row.provider_id) ?? getString(data?.providerID);
+    const modelId = getString(row.model_id) ?? getString(data?.modelID);
+    if (providerId && modelId) {
+      rawModelId = `${providerId}/${modelId}`;
+    }
+  }
+  return rawModelId ? encodeOpencodeModelId(rawModelId) : null;
 }
 
 export function mapOpencodeMessages(
@@ -154,10 +173,12 @@ function mapStoredMessage(
 
   if (role === 'user') {
     const promptText = extractUserQuery(getJoinedTextParts(message.parts));
+    const images = buildUserImages(message.parts, id);
     return {
       assistantMessageId: undefined,
       content: promptText,
       id,
+      ...(images.length > 0 ? { images } : {}),
       role: 'user',
       timestamp: createdAt,
       userMessageId: id,
@@ -408,6 +429,36 @@ function getJoinedTextParts(parts: StoredRow[]): string {
     .join('');
 }
 
+function buildUserImages(parts: StoredRow[], messageId: string): ImageAttachment[] {
+  const images: ImageAttachment[] = [];
+
+  for (const part of parts) {
+    if (getString(part.type) !== 'file') {
+      continue;
+    }
+
+    const parsed = parseImageDataUri(getString(part.url));
+    const mime = getString(part.mime);
+    const mediaType = parsed?.mediaType ?? mime;
+    const data = parsed?.data;
+    if (!data || !mediaType) {
+      continue;
+    }
+
+    const image = buildImageAttachmentFromBase64({
+      data,
+      id: `opencode-img-${messageId}-${images.length}`,
+      mediaType,
+      name: getString(part.filename) ?? getString(part.name) ?? `image-${images.length + 1}.${String(mediaType).split('/')[1] ?? 'img'}`,
+    });
+    if (image) {
+      images.push(image);
+    }
+  }
+
+  return images;
+}
+
 function getDurationSeconds(part: StoredRow): number | undefined {
   const start = getNestedNumber(part, ['time', 'start']);
   const end = getNestedNumber(part, ['time', 'end']);
@@ -477,132 +528,4 @@ function getNestedNumber(
     current = current[key];
   }
   return getNumber(current);
-}
-
-async function loadSqliteModule(): Promise<SqliteModule | null> {
-  try {
-    return await import('node:sqlite');
-  } catch {
-    return null;
-  }
-}
-
-interface StoredSessionRows {
-  messageRows: StoredRow[];
-  partRows: StoredRow[];
-}
-
-async function loadOpencodeSessionRows(
-  databasePath: string,
-  sessionId: string,
-): Promise<StoredSessionRows | null> {
-  const viaNodeSqlite = await loadSessionRowsWithNodeSqlite(databasePath, sessionId);
-  if (viaNodeSqlite) {
-    return viaNodeSqlite;
-  }
-
-  return loadSessionRowsWithSqliteCli(databasePath, sessionId);
-}
-
-async function loadSessionRowsWithNodeSqlite(
-  databasePath: string,
-  sessionId: string,
-): Promise<StoredSessionRows | null> {
-  const sqlite = await loadSqliteModule();
-  if (!sqlite) {
-    return null;
-  }
-
-  let db: InstanceType<SqliteModule['DatabaseSync']> | null = null;
-  try {
-    db = new sqlite.DatabaseSync(databasePath, { readonly: true });
-    const messageRows = db.prepare(OPENCODE_MESSAGE_ROW_SQL).all(sessionId);
-    const partRows = db.prepare(OPENCODE_PART_ROW_SQL).all(sessionId);
-    return { messageRows, partRows };
-  } catch {
-    return null;
-  } finally {
-    db?.close();
-  }
-}
-
-function loadSessionRowsWithSqliteCli(
-  databasePath: string,
-  sessionId: string,
-): StoredSessionRows | null {
-  const escapedSessionId = escapeSqlLiteral(sessionId);
-  const messageRows = runSqlite3JsonQuery(
-    databasePath,
-    buildOpencodeMessageRowsSql(`'${escapedSessionId}'`),
-  );
-  const partRows = runSqlite3JsonQuery(
-    databasePath,
-    buildOpencodePartRowsSql(`'${escapedSessionId}'`),
-  );
-
-  if (!messageRows || !partRows) {
-    return null;
-  }
-
-  return { messageRows, partRows };
-}
-
-function runSqlite3JsonQuery(
-  databasePath: string,
-  sql: string,
-): StoredRow[] | null {
-  const result = spawnSync(
-    'sqlite3',
-    ['-json', databasePath, sql],
-    {
-      encoding: 'utf8',
-    },
-  );
-
-  if (result.error || result.status !== 0) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(result.stdout || '[]') as unknown;
-    return Array.isArray(parsed)
-      ? parsed.filter((row): row is StoredRow => isPlainObject(row))
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function escapeSqlLiteral(value: string): string {
-  return value.replaceAll('\'', '\'\'');
-}
-
-function buildOpencodeMessageRowsSql(sessionIdExpression: string): string {
-  return `
-with message_json as (
-  select
-    id,
-    time_created,
-    data,
-    json_valid(data) as data_valid
-  from message
-  where session_id = ${sessionIdExpression}
-)
-select
-  id,
-  time_created,
-  data_valid,
-  case when data_valid then json_extract(data, '$.role') end as role,
-  case when data_valid then json_extract(data, '$.time.created') end as data_time_created,
-  case when data_valid then json_extract(data, '$.time.completed') end as data_time_completed
-from message_json
-order by time_created asc, id asc;`.trim();
-}
-
-function buildOpencodePartRowsSql(sessionIdExpression: string): string {
-  return `
-select id, message_id, data
-from part
-where session_id = ${sessionIdExpression}
-order by message_id asc, id asc;`.trim();
 }

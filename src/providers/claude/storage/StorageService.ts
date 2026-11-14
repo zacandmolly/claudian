@@ -1,9 +1,7 @@
-import type { App, Plugin } from 'obsidian';
-import { Notice } from 'obsidian';
+import type { App } from 'obsidian';
 
 import { ClaudianSettingsStorage, type StoredClaudianSettings } from '../../../app/settings/ClaudianSettingsStorage';
-import { SESSIONS_PATH, SessionStorage } from '../../../core/bootstrap/SessionStorage';
-import { CLAUDIAN_STORAGE_PATH } from '../../../core/bootstrap/StoragePaths';
+import { CLAUDIAN_STORAGE_PATH, SESSIONS_PATH } from '../../../core/bootstrap/storagePaths';
 import { VaultFileAdapter } from '../../../core/storage/VaultFileAdapter';
 import type {
   SlashCommand,
@@ -15,19 +13,18 @@ import {
 } from '../types/settings';
 import { AGENTS_PATH, AgentVaultStorage } from './AgentVaultStorage';
 import { CCSettingsStorage } from './CCSettingsStorage';
-import { McpStorage } from './McpStorage';
 import { SKILLS_PATH, SkillStorage } from './SkillStorage';
 import { COMMANDS_PATH, SlashCommandStorage } from './SlashCommandStorage';
 
 export const CLAUDE_PATH = '.claude';
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
 export interface CombinedSettings {
   cc: CCSettings;
   claudian: StoredClaudianSettings;
+}
+
+interface StorageServicePlugin {
+  readonly app: App;
 }
 
 export class StorageService {
@@ -35,24 +32,18 @@ export class StorageService {
   readonly claudianSettings: ClaudianSettingsStorage;
   readonly commands: SlashCommandStorage;
   readonly skills: SkillStorage;
-  readonly sessions: SessionStorage;
-  readonly mcp: McpStorage;
   readonly agents: AgentVaultStorage;
 
   private adapter: VaultFileAdapter;
-  private plugin: Plugin;
   private app: App;
 
-  constructor(plugin: Plugin, adapter?: VaultFileAdapter) {
-    this.plugin = plugin;
+  constructor(plugin: StorageServicePlugin, adapter?: VaultFileAdapter) {
     this.app = plugin.app;
     this.adapter = adapter ?? new VaultFileAdapter(this.app);
     this.ccSettings = new CCSettingsStorage(this.adapter);
     this.claudianSettings = new ClaudianSettingsStorage(this.adapter);
     this.commands = new SlashCommandStorage(this.adapter);
     this.skills = new SkillStorage(this.adapter);
-    this.sessions = new SessionStorage(this.adapter);
-    this.mcp = new McpStorage(this.adapter);
     this.agents = new AgentVaultStorage(this.adapter);
   }
 
@@ -116,70 +107,4 @@ export class StorageService {
     return this.claudianSettings.load();
   }
 
-  async getTabManagerState(): Promise<TabManagerPersistedState | null> {
-    try {
-      const data: unknown = await this.plugin.loadData();
-      if (isRecord(data) && data.tabManagerState) {
-        return this.validateTabManagerState(data.tabManagerState);
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  }
-
-  private validateTabManagerState(data: unknown): TabManagerPersistedState | null {
-    if (!data || typeof data !== 'object') {
-      return null;
-    }
-
-    const state = data as Record<string, unknown>;
-
-    if (!Array.isArray(state.openTabs)) {
-      return null;
-    }
-
-    const validatedTabs: Array<{ tabId: string; conversationId: string | null; draftModel?: string | null }> = [];
-    for (const tab of state.openTabs) {
-      if (!tab || typeof tab !== 'object') {
-        continue; // Skip invalid entries
-      }
-      const tabObj = tab as Record<string, unknown>;
-      if (typeof tabObj.tabId !== 'string') {
-        continue; // Skip entries without valid tabId
-      }
-      validatedTabs.push({
-        tabId: tabObj.tabId,
-        conversationId:
-          typeof tabObj.conversationId === 'string' ? tabObj.conversationId : null,
-        ...(typeof tabObj.draftModel === 'string'
-          ? { draftModel: tabObj.draftModel }
-          : {}),
-      });
-    }
-
-    const activeTabId =
-      typeof state.activeTabId === 'string' ? state.activeTabId : null;
-
-    return {
-      openTabs: validatedTabs,
-      activeTabId,
-    };
-  }
-
-  async setTabManagerState(state: TabManagerPersistedState): Promise<void> {
-    try {
-      const loaded: unknown = await this.plugin.loadData();
-      const data = isRecord(loaded) ? loaded : {};
-      data.tabManagerState = state;
-      await this.plugin.saveData(data);
-    } catch {
-      new Notice('Failed to save tab layout');
-    }
-  }
-}
-
-export interface TabManagerPersistedState {
-  openTabs: Array<{ tabId: string; conversationId: string | null; draftModel?: string | null }>;
-  activeTabId: string | null;
 }

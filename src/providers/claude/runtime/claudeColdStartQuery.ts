@@ -1,22 +1,33 @@
-import type { Options } from '@anthropic-ai/claude-agent-sdk';
-import { query as agentQuery } from '@anthropic-ai/claude-agent-sdk';
+import type {
+  Options,
+  Query,
+  SDKMessage,
+  SDKUserMessage,
+} from '@anthropic-ai/claude-agent-sdk';
 
+import type { ProviderHost } from '../../../core/providers/ProviderHost';
 import { ProviderSettingsCoordinator } from '../../../core/providers/ProviderSettingsCoordinator';
-import type ClaudianPlugin from '../../../main';
-import { getEnhancedPath, getMissingNodeError, parseEnvironmentVariables } from '../../../utils/env';
+import { getEnhancedPath, getMissingNodeError } from '../../../utils/env';
 import { getVaultPath } from '../../../utils/path';
 import { extractAssistantText } from '../auxiliary/extractAssistantText';
+import {
+  normalizeClaudeRuntimeModelId,
+  resolveClaudeModelEnvironment,
+} from '../env/modelEnvironment';
+import { loadClaudeAgentQuery } from '../loadClaudeAgentSdk';
+import { toClaudeRuntimeModelId } from '../modelSelection';
 import {
   getClaudeProviderSettings,
   resolveClaudeSettingSources,
 } from '../settings';
 import {
   resolveEffortLevel,
+  supportsClaudeAdaptiveThinking,
 } from '../types/models';
 import { createCustomSpawnFunction } from './customSpawn';
 
 export interface ColdStartQueryConfig {
-  plugin: ClaudianPlugin;
+  plugin: ProviderHost;
   systemPrompt: string;
   /** Tools available to the model. Omit for SDK default (all tools). */
   tools?: string[];
@@ -39,33 +50,46 @@ export interface ColdStartQueryConfig {
   onTextChunk?: (accumulatedText: string) => void;
 }
 
+/**
+ * Provider-execution path. The caller has already resolved the complete
+ * native options and prompt, while this helper retains cold-start query
+ * ownership and iteration semantics.
+ */
+export interface PreparedColdStartQueryConfig {
+  options: Options;
+  prompt: string | AsyncIterable<SDKUserMessage>;
+  onQuery?: (query: Query) => void;
+  onMessage?: (message: SDKMessage) => void | Promise<void>;
+  stopAfterResult?: boolean;
+}
+
 export interface ColdStartQueryResult {
   text: string;
   sessionId: string | null;
 }
 
-export async function runColdStartQuery(
+export function runColdStartQuery(
   config: ColdStartQueryConfig,
   prompt: string,
+): Promise<ColdStartQueryResult>;
+export function runColdStartQuery(
+  config: PreparedColdStartQueryConfig,
+): Promise<ColdStartQueryResult>;
+export async function runColdStartQuery(
+  config: ColdStartQueryConfig | PreparedColdStartQueryConfig,
+  prompt?: string,
 ): Promise<ColdStartQueryResult> {
+  if (isPreparedColdStartQueryConfig(config)) {
+    return await runPreparedColdStartQuery(config);
+  }
   const vaultPath = getVaultPath(config.plugin.app);
   if (!vaultPath) {
     throw new Error('Could not determine vault path');
   }
 
-  const resolvedClaudePath = config.plugin.getResolvedProviderCliPath('claude');
+  const resolvedClaudePath = await config.plugin.getResolvedProviderCliPath('claude');
   if (!resolvedClaudePath) {
     throw new Error('Claude CLI not found');
-  }
-
-  const customEnv = parseEnvironmentVariables(
-    config.plugin.getActiveEnvironmentVariables('claude')
-  );
-  const enhancedPath = getEnhancedPath(customEnv.PATH, resolvedClaudePath);
-
-  const missingNodeError = getMissingNodeError(resolvedClaudePath, enhancedPath);
-  if (missingNodeError) {
-    throw new Error(missingNodeError);
   }
 
   const settings = config.providerSettings
@@ -73,14 +97,29 @@ export async function runColdStartQuery(
       config.plugin.settings,
       'claude',
     );
-  const claudeSettings = getClaudeProviderSettings(settings);
+  const selectedModel = toClaudeRuntimeModelId(
+    config.model ?? (settings.model as string),
+  );
+  const modelEnvironment = resolveClaudeModelEnvironment(
+    settings,
+    config.plugin.getActiveEnvironmentVariables('claude'),
+    selectedModel,
+  );
+  const customEnv = modelEnvironment.environment;
+  const enhancedPath = getEnhancedPath(customEnv.PATH, resolvedClaudePath);
 
-  const selectedModel = config.model ?? (settings.model as string);
+  const missingNodeError = getMissingNodeError(resolvedClaudePath, enhancedPath);
+  if (missingNodeError) {
+    throw new Error(missingNodeError);
+  }
+
+  const claudeSettings = getClaudeProviderSettings(settings);
+  const runtimeModel = normalizeClaudeRuntimeModelId(selectedModel);
 
   const options: Options = {
     cwd: vaultPath,
     systemPrompt: config.systemPrompt,
-    model: selectedModel,
+    model: runtimeModel,
     abortController: config.abortController,
     pathToClaudeCodeExecutable: resolvedClaudePath,
     env: {
@@ -114,15 +153,19 @@ export async function runColdStartQuery(
     options.extraArgs = { ...options.extraArgs, 'enable-auto-mode': null };
   }
 
-  if (!config.thinking?.disabled) {
-    const effortLevel = resolveEffortLevel(selectedModel, settings.effortLevel);
+  if (!config.thinking?.disabled && supportsClaudeAdaptiveThinking(runtimeModel)) {
+    const effortLevel = resolveEffortLevel(runtimeModel, settings.effortLevel);
     options.thinking = { type: 'adaptive' };
-    // SDK runtime accepts `xhigh` on Opus 4.7+ and silently falls back to
-    // `high` elsewhere, but its type definition lags our local EffortLevel.
+    // SDK runtime accepts `xhigh` on Opus 4.7+, Sonnet 5+, and Fable, and silently
+    // falls back to `high` elsewhere, but its type definition lags our local EffortLevel.
     options.effort = effortLevel;
   }
 
-  const response = agentQuery({ prompt, options });
+  const agentQuery = await loadClaudeAgentQuery();
+  if (config.abortController?.signal.aborted) {
+    throw new Error('Cancelled');
+  }
+  const response = agentQuery({ prompt: prompt ?? '', options });
   let responseText = '';
   let sessionId: string | null = null;
 
@@ -148,4 +191,47 @@ export async function runColdStartQuery(
   }
 
   return { text: responseText, sessionId };
+}
+
+async function runPreparedColdStartQuery(
+  execution: PreparedColdStartQueryConfig,
+): Promise<ColdStartQueryResult> {
+  const agentQuery = await loadClaudeAgentQuery();
+  execution.options.abortController?.signal.throwIfAborted();
+  const response = agentQuery({
+    prompt: execution.prompt,
+    options: execution.options,
+  });
+  execution.onQuery?.(response);
+  let responseText = '';
+  let sessionId: string | null = null;
+
+  for await (const message of response) {
+    await execution.onMessage?.(message);
+    if (
+      message.type === 'system'
+      && message.subtype === 'init'
+      && message.session_id
+    ) {
+      sessionId = message.session_id;
+    }
+    const text = extractAssistantText(message);
+    if (text) {
+      responseText += text;
+    }
+    if (execution.stopAfterResult && message.type === 'result') {
+      break;
+    }
+  }
+
+  return {
+    text: responseText,
+    sessionId,
+  };
+}
+
+function isPreparedColdStartQueryConfig(
+  config: ColdStartQueryConfig | PreparedColdStartQueryConfig,
+): config is PreparedColdStartQueryConfig {
+  return 'options' in config && 'prompt' in config;
 }

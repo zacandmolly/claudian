@@ -1,3 +1,7 @@
+import {
+  DEFAULT_REASONING_VALUE,
+  formatReasoningValueLabel,
+} from '../../../core/providers/reasoning';
 import type {
   ProviderChatUIConfig,
   ProviderPermissionModeToggleConfig,
@@ -6,21 +10,33 @@ import type {
   ProviderUIOption,
 } from '../../../core/providers/types';
 import { OPENAI_PROVIDER_ICON } from '../../../shared/icons';
-import { getCodexModelOptions } from '../modelOptions';
-import { applyCodexModelDefaults } from '../settings';
+import { getCodexModelOptions, resolveCodexDefaultModelId } from '../modelOptions';
 import {
-  DEFAULT_CODEX_MODEL_SET,
-  DEFAULT_CODEX_PRIMARY_MODEL,
-  FAST_TIER_CODEX_DESCRIPTION,
-  FAST_TIER_CODEX_MODEL,
-} from '../types/models';
+  CODEX_DEFAULT_SERVICE_TIER,
+  CODEX_FALLBACK_REASONING_EFFORT_VALUES,
+  findCodexModelCapability,
+  getCodexDefaultReasoningEffort,
+  getCodexFastServiceTier,
+  getCodexModelContextWindow,
+  getCodexReasoningEffortOptions,
+  getDefaultCodexModel,
+  isCodexModelAvailable,
+  resolveCodexModelServiceTier,
+} from '../models';
+import {
+  isCodexModelSelectionId,
+  looksLikeCodexModel,
+  toCodexRuntimeModelId,
+} from '../modelSelection';
+import {
+  applyCodexModelDefaults,
+  getCodexProviderSettings,
+  getVisibleCodexModelIds,
+} from '../settings';
 
 const EFFORT_LEVELS: ProviderReasoningOption[] = [
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-  { value: 'xhigh', label: 'XHigh' },
-];
+  ...CODEX_FALLBACK_REASONING_EFFORT_VALUES,
+].map(value => ({ value, label: formatReasoningValueLabel(value) }));
 
 const CODEX_PERMISSION_MODE_TOGGLE: ProviderPermissionModeToggleConfig = {
   inactiveValue: 'normal',
@@ -31,18 +47,20 @@ const CODEX_PERMISSION_MODE_TOGGLE: ProviderPermissionModeToggleConfig = {
   planLabel: 'Plan',
 };
 
-const CODEX_SERVICE_TIER_TOGGLE: ProviderServiceTierToggleConfig = {
-  inactiveValue: 'default',
-  inactiveLabel: 'Standard',
-  activeValue: 'fast',
-  activeLabel: 'Fast',
-  description: FAST_TIER_CODEX_DESCRIPTION,
-};
+const DEFAULT_SERVICE_TIER_LABEL = 'Standard';
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 
-function looksLikeCodexModel(model: string): boolean {
-  return /^gpt-/i.test(model) || /^o\d/i.test(model);
+function getVisibleDiscoveredModels(settings: Record<string, unknown>) {
+  const codexSettings = getCodexProviderSettings(settings);
+  const visibleModelIds = new Set(getVisibleCodexModelIds(
+    codexSettings.visibleModels,
+    codexSettings.discoveredModels,
+  ));
+  return codexSettings.discoveredModels.filter(model =>
+    visibleModelIds.has(model.model)
+    && isCodexModelAvailable(model, codexSettings.enableUltraEffort)
+  );
 }
 
 export const codexChatUIConfig: ProviderChatUIConfig = {
@@ -50,32 +68,81 @@ export const codexChatUIConfig: ProviderChatUIConfig = {
     return getCodexModelOptions(settings);
   },
 
+  hasAuthoritativeModelCatalog(settings: Record<string, unknown>): boolean {
+    const codexSettings = getCodexProviderSettings(settings);
+    if (codexSettings.visibleModels !== null) {
+      return true;
+    }
+    return codexSettings.discoveredModels.some(model =>
+      isCodexModelAvailable(model, codexSettings.enableUltraEffort)
+    );
+  },
+
+  getDefaultModel(settings: Record<string, unknown>): string | null {
+    return resolveCodexDefaultModelId(settings);
+  },
+
   ownsModel(model: string, settings: Record<string, unknown>): boolean {
-    if (getCodexModelOptions(settings).some((option: ProviderUIOption) => option.value === model)) {
+    if (isCodexModelSelectionId(model)) {
       return true;
     }
 
-    return looksLikeCodexModel(model);
+    const runtimeModel = toCodexRuntimeModelId(model);
+    if (getCodexModelOptions(settings).some((option: ProviderUIOption) =>
+      option.value === model || toCodexRuntimeModelId(option.value) === runtimeModel
+    )) {
+      return true;
+    }
+
+    return looksLikeCodexModel(runtimeModel);
   },
 
   isAdaptiveReasoningModel(_model: string, _settings: Record<string, unknown>): boolean {
     return true;
   },
 
-  getReasoningOptions(_model: string, _settings: Record<string, unknown>): ProviderReasoningOption[] {
-    return [...EFFORT_LEVELS];
+  getReasoningOptions(modelId: string, settings: Record<string, unknown>): ProviderReasoningOption[] {
+    const codexSettings = getCodexProviderSettings(settings);
+    const model = findCodexModelCapability(
+      codexSettings.discoveredModels,
+      modelId,
+    );
+    if (!model) {
+      return [...EFFORT_LEVELS];
+    }
+
+    return getCodexReasoningEffortOptions(model, codexSettings.enableUltraEffort).map(option => ({
+      value: option.value,
+      label: formatReasoningValueLabel(option.value),
+      ...(option.description ? { description: option.description } : {}),
+    }));
   },
 
-  getDefaultReasoningValue(_model: string, _settings: Record<string, unknown>): string {
-    return 'medium';
+  getDefaultReasoningValue(modelId: string, settings: Record<string, unknown>): string {
+    const codexSettings = getCodexProviderSettings(settings);
+    const model = findCodexModelCapability(
+      codexSettings.discoveredModels,
+      modelId,
+    );
+    return model
+      ? getCodexDefaultReasoningEffort(model, codexSettings.enableUltraEffort)
+        ?? DEFAULT_REASONING_VALUE
+      : DEFAULT_REASONING_VALUE;
   },
 
-  getContextWindowSize(): number {
-    return DEFAULT_CONTEXT_WINDOW;
+  getContextWindowSize(
+    model: string,
+    _customLimits?: Record<string, number>,
+    settings?: Record<string, unknown>,
+  ): number {
+    const discoveredModels = settings
+      ? getCodexProviderSettings(settings).discoveredModels
+      : [];
+    return getCodexModelContextWindow(discoveredModels, model) ?? DEFAULT_CONTEXT_WINDOW;
   },
 
   isDefaultModel(model: string): boolean {
-    return DEFAULT_CODEX_MODEL_SET.has(model);
+    return looksLikeCodexModel(toCodexRuntimeModelId(model)) && !isCodexModelSelectionId(model);
   },
 
   applyModelDefaults(model: string, settings: unknown): void {
@@ -83,20 +150,30 @@ export const codexChatUIConfig: ProviderChatUIConfig = {
       return;
     }
 
-    applyCodexModelDefaults(model, settings as Record<string, unknown>);
+    applyCodexModelDefaults(toCodexRuntimeModelId(model), settings as Record<string, unknown>);
   },
 
   normalizeModelVariant(model: string, settings: Record<string, unknown>): string {
-    if (getCodexModelOptions(settings).some((option) => option.value === model)) {
+    const runtimeModel = toCodexRuntimeModelId(model);
+    const option = getCodexModelOptions(settings).find((candidate) =>
+      candidate.value === model || toCodexRuntimeModelId(candidate.value) === runtimeModel
+    );
+    if (option) {
+      return option.value;
+    }
+
+    const codexSettings = getCodexProviderSettings(settings);
+    const discoveredModels = codexSettings.discoveredModels;
+    if (discoveredModels.length === 0) {
       return model;
     }
 
-    return DEFAULT_CODEX_PRIMARY_MODEL;
+    return getDefaultCodexModel(getVisibleDiscoveredModels(settings))?.model ?? model;
   },
 
   getCustomModelIds(envVars: Record<string, string>): Set<string> {
     const ids = new Set<string>();
-    if (envVars.OPENAI_MODEL && !DEFAULT_CODEX_MODEL_SET.has(envVars.OPENAI_MODEL)) {
+    if (envVars.OPENAI_MODEL && !looksLikeCodexModel(envVars.OPENAI_MODEL)) {
       ids.add(envVars.OPENAI_MODEL);
     }
     return ids;
@@ -107,7 +184,27 @@ export const codexChatUIConfig: ProviderChatUIConfig = {
   },
 
   getServiceTierToggle(settings): ProviderServiceTierToggleConfig | null {
-    return settings.model === FAST_TIER_CODEX_MODEL ? CODEX_SERVICE_TIER_TOGGLE : null;
+    const model = findCodexModelCapability(
+      getCodexProviderSettings(settings).discoveredModels,
+      typeof settings.model === 'string' ? settings.model : undefined,
+    );
+    if (!model) {
+      return null;
+    }
+
+    const tier = getCodexFastServiceTier(model);
+    if (!tier) {
+      return null;
+    }
+
+    return {
+      inactiveValue: CODEX_DEFAULT_SERVICE_TIER,
+      inactiveLabel: DEFAULT_SERVICE_TIER_LABEL,
+      activeValue: tier.id,
+      activeLabel: tier.name,
+      isActive: resolveCodexModelServiceTier(model, settings.serviceTier) === tier.id,
+      description: tier.description || undefined,
+    };
   },
 
   getProviderIcon() {

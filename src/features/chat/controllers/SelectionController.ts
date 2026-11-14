@@ -1,10 +1,10 @@
-import type { App } from 'obsidian';
+import type { App, WorkspaceLeaf } from 'obsidian';
 import { MarkdownView } from 'obsidian';
 
 import { hideSelectionHighlight, showSelectionHighlight } from '../../../shared/components/SelectionHighlight';
 import { type EditorSelectionContext, getEditorView } from '../../../utils/editor';
 import type { StoredSelection } from '../state/types';
-import { updateContextRowHasContent } from './contextRowVisibility';
+import type { ComposerContextTray } from '../ui/ComposerContextTray';
 
 const SELECTION_POLL_INTERVAL = 250;
 const INPUT_HANDOFF_GRACE_MS = 1500;
@@ -15,14 +15,16 @@ type CustomHighlightRegistry = {
   set: (name: string, highlight: unknown) => void;
 };
 type CustomHighlightConstructor = new (...ranges: Range[]) => unknown;
+type FocusScopeInput = HTMLElement | HTMLElement[];
 
 export class SelectionController {
   private app: App;
-  private indicatorEl: HTMLElement;
+  private contextTray: ComposerContextTray;
   private inputEl: HTMLElement;
-  private focusScopeEl: HTMLElement;
-  private contextRowEl: HTMLElement;
+  private focusScopeEls: HTMLElement[];
   private onVisibilityChange: (() => void) | null;
+  private onUserSelectionChanged: (() => void) | null;
+  private owningLeaf: WorkspaceLeaf | null;
   private storedSelection: StoredSelection | null = null;
   private inputHandoffGraceUntil: number | null = null;
   private pollInterval: number | null = null;
@@ -30,28 +32,38 @@ export class SelectionController {
     if (!this.storedSelection) return;
     this.inputHandoffGraceUntil = Date.now() + INPUT_HANDOFF_GRACE_MS;
   };
+  private readonly focusScopeFocusInHandler = (event: FocusEvent) => {
+    const relatedTarget = event.relatedTarget as Node | null;
+    if (relatedTarget && this.isNodeWithinFocusScopes(relatedTarget)) return;
+    this.showHighlight();
+  };
 
   constructor(
     app: App,
-    indicatorEl: HTMLElement,
+    contextTray: ComposerContextTray,
     inputEl: HTMLElement,
-    contextRowEl: HTMLElement,
     onVisibilityChange?: () => void,
-    focusScopeEl?: HTMLElement
+    focusScopeEl?: FocusScopeInput,
+    onUserSelectionChanged?: () => void,
+    owningLeaf?: WorkspaceLeaf,
   ) {
     this.app = app;
-    this.indicatorEl = indicatorEl;
+    this.contextTray = contextTray;
     this.inputEl = inputEl;
-    this.focusScopeEl = focusScopeEl ?? inputEl;
-    this.contextRowEl = contextRowEl;
+    this.focusScopeEls = this.normalizeFocusScopes(focusScopeEl);
     this.onVisibilityChange = onVisibilityChange ?? null;
+    this.onUserSelectionChanged = onUserSelectionChanged ?? null;
+    this.owningLeaf = owningLeaf ?? null;
   }
 
   start(): void {
     if (this.pollInterval) return;
     this.inputEl.addEventListener('pointerdown', this.focusScopePointerDownHandler);
-    if (this.focusScopeEl !== this.inputEl) {
-      this.focusScopeEl.addEventListener('pointerdown', this.focusScopePointerDownHandler);
+    for (const focusScopeEl of this.focusScopeEls) {
+      if (focusScopeEl !== this.inputEl) {
+        focusScopeEl.addEventListener('pointerdown', this.focusScopePointerDownHandler);
+      }
+      focusScopeEl.addEventListener('focusin', this.focusScopeFocusInHandler);
     }
     this.pollInterval = window.setInterval(() => this.poll(), SELECTION_POLL_INTERVAL);
   }
@@ -62,8 +74,11 @@ export class SelectionController {
       this.pollInterval = null;
     }
     this.inputEl.removeEventListener('pointerdown', this.focusScopePointerDownHandler);
-    if (this.focusScopeEl !== this.inputEl) {
-      this.focusScopeEl.removeEventListener('pointerdown', this.focusScopePointerDownHandler);
+    for (const focusScopeEl of this.focusScopeEls) {
+      if (focusScopeEl !== this.inputEl) {
+        focusScopeEl.removeEventListener('pointerdown', this.focusScopePointerDownHandler);
+      }
+      focusScopeEl.removeEventListener('focusin', this.focusScopeFocusInHandler);
     }
     this.clear();
   }
@@ -128,6 +143,7 @@ export class SelectionController {
         }
         this.storedSelection = { notePath, selectedText, lineCount, startLine, from, to, editorView };
         this.updateIndicator();
+        this.onUserSelectionChanged?.();
       }
     } else {
       this.handleDeselection();
@@ -171,6 +187,7 @@ export class SelectionController {
         this.clearHighlight();
         this.storedSelection = { notePath, selectedText, lineCount, domRanges };
         this.updateIndicator();
+        this.onUserSelectionChanged?.();
       }
     } else {
       this.handleDeselection();
@@ -243,10 +260,31 @@ export class SelectionController {
     return ownerDocument?.activeElement ?? this.inputEl.ownerDocument?.activeElement ?? null;
   }
 
+  private normalizeFocusScopes(focusScopeEl?: FocusScopeInput): HTMLElement[] {
+    const focusScopes = Array.isArray(focusScopeEl)
+      ? focusScopeEl
+      : [focusScopeEl ?? this.inputEl];
+    return Array.from(new Set(focusScopes.filter(Boolean)));
+  }
+
+  private getFocusScopeOwnerDocument(): Document | null {
+    return this.focusScopeEls[0]?.ownerDocument ?? this.inputEl.ownerDocument ?? null;
+  }
+
+  private isNodeWithinFocusScopes(node: Node): boolean {
+    return this.focusScopeEls.some((focusScopeEl) =>
+      node === focusScopeEl || focusScopeEl.contains(node)
+    );
+  }
+
   private isFocusWithinChatSidebar(): boolean {
-    const activeElement = this.getActiveElement(this.focusScopeEl.ownerDocument) as Node | null;
-    return activeElement !== null
-      && (activeElement === this.focusScopeEl || this.focusScopeEl.contains(activeElement));
+    const activeElement = this.getActiveElement(this.getFocusScopeOwnerDocument()) as Node | null;
+    if (activeElement !== null && this.isNodeWithinFocusScopes(activeElement)) {
+      return true;
+    }
+
+    return this.owningLeaf !== null
+      && this.app.workspace.getMostRecentLeaf() === this.owningLeaf;
   }
 
   private isNativeEditorSelectionVisible(sel: StoredSelection): boolean {
@@ -268,7 +306,7 @@ export class SelectionController {
       return false;
     }
 
-    return this.selectionMatchesRanges(this.getDocumentSelection(this.focusScopeEl.ownerDocument), ranges);
+    return this.selectionMatchesRanges(this.getDocumentSelection(this.getFocusScopeOwnerDocument()), ranges);
   }
 
   private clearWhenMarkdownContextIsUnavailable(): void {
@@ -285,6 +323,7 @@ export class SelectionController {
     this.clearHighlight();
     this.storedSelection = null;
     this.updateIndicator();
+    this.onUserSelectionChanged?.();
   }
 
   private handleDeselection(): void {
@@ -302,6 +341,7 @@ export class SelectionController {
     this.clearHighlight();
     this.storedSelection = null;
     this.updateIndicator();
+    this.onUserSelectionChanged?.();
   }
 
   // ============================================
@@ -352,21 +392,27 @@ export class SelectionController {
   // ============================================
 
   private updateIndicator(): void {
-    if (!this.indicatorEl) return;
-
     if (this.storedSelection) {
       const lineText = this.storedSelection.lineCount === 1 ? 'line' : 'lines';
-      this.indicatorEl.textContent = `${this.storedSelection.lineCount} ${lineText} selected`;
-      this.indicatorEl.removeClass('claudian-hidden');
+      const label = `${this.storedSelection.lineCount} ${lineText} selected`;
+      this.contextTray.setItems('editor-selection', [{
+        id: 'editor-selection',
+        kind: 'selection',
+        label,
+        icon: 'text-select',
+        ariaLabel: label,
+        onRemove: () => {
+          this.clear();
+          this.onUserSelectionChanged?.();
+        },
+      }]);
     } else {
-      this.indicatorEl.addClass('claudian-hidden');
+      this.contextTray.clearItems('editor-selection');
     }
     this.updateContextRowVisibility();
   }
 
   updateContextRowVisibility(): void {
-    if (!this.contextRowEl) return;
-    updateContextRowHasContent(this.contextRowEl);
     this.onVisibilityChange?.();
   }
 

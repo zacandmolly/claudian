@@ -1,3 +1,4 @@
+import { formatReasoningValueLabel } from '../../../core/providers/reasoning';
 import type {
   ProviderChatUIConfig,
   ProviderPermissionModeToggleConfig,
@@ -11,7 +12,6 @@ import {
   getPiSupportedThinkingLevels,
   isPiModelSelectionId,
   PI_DEFAULT_THINKING_LEVEL,
-  PI_SYNTHETIC_MODEL_ID,
   type PiDiscoveredModel,
   type PiThinkingLevel,
 } from '../models';
@@ -20,9 +20,6 @@ import {
   updatePiProviderSettings,
 } from '../settings';
 
-const PI_MODELS: ProviderUIOption[] = [
-  { value: PI_SYNTHETIC_MODEL_ID, label: 'Pi', description: 'Configure models in settings' },
-];
 const DEFAULT_PI_REASONING_LEVELS = getPiSupportedThinkingLevels({ reasoning: true });
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const PI_PERMISSION_MODE_TOGGLE: ProviderPermissionModeToggleConfig = {
@@ -39,17 +36,9 @@ export const piChatUIConfig: ProviderChatUIConfig = {
       model.encodedId,
       buildModelOption(model, piSettings.modelAliases[model.encodedId]),
     ]));
-    const savedProviderModel = (
-      settings.savedProviderModel
-      && typeof settings.savedProviderModel === 'object'
-      && !Array.isArray(settings.savedProviderModel)
-    )
-      ? settings.savedProviderModel as Record<string, unknown>
-      : null;
-
     const options: ProviderUIOption[] = [];
     const seen = new Set<string>();
-    for (const encodedId of piSettings.visibleModels) {
+    for (const encodedId of [...piSettings.visibleModels].reverse()) {
       pushOption(
         options,
         seen,
@@ -63,34 +52,15 @@ export const piChatUIConfig: ProviderChatUIConfig = {
       );
     }
 
-    const selectedModelValues = [
-      typeof settings.model === 'string' ? settings.model : '',
-      typeof savedProviderModel?.pi === 'string' ? savedProviderModel.pi : '',
-    ];
+    return options;
+  },
 
-    for (const model of selectedModelValues) {
-      if (!model || model === PI_SYNTHETIC_MODEL_ID || !decodePiModelId(model)) {
-        continue;
-      }
-
-      pushOption(
-        options,
-        seen,
-        model,
-        discoveredModels.get(model)
-          ?? {
-            description: 'Selected in an existing session',
-            label: piSettings.modelAliases[model] ?? formatFallbackLabel(model),
-            value: model,
-          },
-      );
-    }
-
-    return options.length > 0 ? options : [...PI_MODELS];
+  getDefaultModel(settings: Record<string, unknown>): string | null {
+    return getPiProviderSettings(settings).visibleModels[0] ?? null;
   },
 
   ownsModel(model: string): boolean {
-    return model === PI_SYNTHETIC_MODEL_ID || decodePiModelId(model) !== null;
+    return isPiModelSelectionId(model);
   },
 
   isAdaptiveReasoningModel(model: string, settings: Record<string, unknown>): boolean {
@@ -107,23 +77,12 @@ export const piChatUIConfig: ProviderChatUIConfig = {
     const levels = piModel?.thinkingLevels
       ?? (decodePiModelId(model) ? DEFAULT_PI_REASONING_LEVELS : ['off']);
     return levels.map((level) => ({
-      label: formatThinkingLevelLabel(level),
+      label: formatReasoningValueLabel(level),
       value: level,
     }));
   },
 
-  getDefaultReasoningValue(model: string, settings: Record<string, unknown>): string {
-    const piModel = getCachedModel(model, settings);
-    if (!piModel) {
-      return decodePiModelId(model) ? PI_DEFAULT_THINKING_LEVEL : 'off';
-    }
-
-    const piSettings = getPiProviderSettings(settings);
-    return clampPiThinkingLevel(
-      piSettings.preferredThinkingByModel[piModel.encodedId],
-      piModel.thinkingLevels,
-    );
-  },
+  getDefaultReasoningValue: getPiDefaultReasoningValue,
 
   getContextWindowSize(
     model: string,
@@ -140,20 +99,9 @@ export const piChatUIConfig: ProviderChatUIConfig = {
     return isPiModelSelectionId(model);
   },
 
-  applyModelDefaults(model: string, settings: unknown): void {
-    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
-      return;
-    }
+  applyModelDefaults: applyPiModelDefaults,
 
-    const settingsBag = settings as Record<string, unknown>;
-    if (!decodePiModelId(model)) {
-      settingsBag.effortLevel = 'off';
-      return;
-    }
-
-    settingsBag.model = model;
-    settingsBag.effortLevel = this.getDefaultReasoningValue(model, settingsBag);
-  },
+  applyModelProjectionDefaults: applyPiModelProjectionDefaults,
 
   applyReasoningSelection(model: string, value: string, settings: unknown): void {
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
@@ -228,6 +176,46 @@ function getCachedModel(model: string, settings: Record<string, unknown>): PiDis
   return getPiProviderSettings(settings).discoveredModels.find(entry => entry.encodedId === model) ?? null;
 }
 
+function applyPiModelDefaults(model: string, settings: unknown): void {
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+    return;
+  }
+
+  const settingsBag = settings as Record<string, unknown>;
+  if (!decodePiModelId(model)) {
+    settingsBag.effortLevel = 'off';
+    return;
+  }
+
+  settingsBag.model = model;
+  settingsBag.effortLevel = getPiDefaultReasoningValue(model, settingsBag);
+}
+
+function applyPiModelProjectionDefaults(model: string, settings: unknown): void {
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+    return;
+  }
+
+  const settingsBag = settings as Record<string, unknown>;
+  const preferredThinkingLevel = getPiProviderSettings(settingsBag).preferredThinkingByModel[model];
+  if (preferredThinkingLevel) {
+    settingsBag.effortLevel = preferredThinkingLevel;
+  }
+}
+
+function getPiDefaultReasoningValue(model: string, settings: Record<string, unknown>): string {
+  const piModel = getCachedModel(model, settings);
+  if (!piModel) {
+    return decodePiModelId(model) ? PI_DEFAULT_THINKING_LEVEL : 'off';
+  }
+
+  const piSettings = getPiProviderSettings(settings);
+  return clampPiThinkingLevel(
+    piSettings.preferredThinkingByModel[piModel.encodedId],
+    piModel.thinkingLevels,
+  );
+}
+
 function buildModelOption(model: PiDiscoveredModel, alias: string | undefined): ProviderUIOption {
   return {
     description: `${model.provider} runtime`,
@@ -240,12 +228,6 @@ function buildModelOption(model: PiDiscoveredModel, alias: string | undefined): 
 function formatFallbackLabel(encodedId: string): string {
   const decoded = decodePiModelId(encodedId);
   return decoded ? `${decoded.provider}/${decoded.modelId}` : 'Pi';
-}
-
-function formatThinkingLevelLabel(value: PiThinkingLevel): string {
-  return value === 'xhigh'
-    ? 'XHigh'
-    : value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 function pushOption(

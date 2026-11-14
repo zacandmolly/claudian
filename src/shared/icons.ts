@@ -1,58 +1,32 @@
+import { decodeProviderModelSelectionId } from '../core/providers/modelSelection';
 import type { ProviderIconSvg, ProviderSvgChild } from '../core/providers/types';
 
 export const MCP_ICON_SVG = `<svg fill="currentColor" fill-rule="evenodd" height="1em" viewBox="0 0 24 24" width="1em" xmlns="http://www.w3.org/2000/svg"><title>MCP</title><path d="M15.688 2.343a2.588 2.588 0 00-3.61 0l-9.626 9.44a.863.863 0 01-1.203 0 .823.823 0 010-1.18l9.626-9.44a4.313 4.313 0 016.016 0 4.116 4.116 0 011.204 3.54 4.3 4.3 0 013.609 1.18l.05.05a4.115 4.115 0 010 5.9l-8.706 8.537a.274.274 0 000 .393l1.788 1.754a.823.823 0 010 1.18.863.863 0 01-1.203 0l-1.788-1.753a1.92 1.92 0 010-2.754l8.706-8.538a2.47 2.47 0 000-3.54l-.05-.049a2.588 2.588 0 00-3.607-.003l-7.172 7.034-.002.002-.098.097a.863.863 0 01-1.204 0 .823.823 0 010-1.18l7.273-7.133a2.47 2.47 0 00-.003-3.537z"></path><path d="M14.485 4.703a.823.823 0 000-1.18.863.863 0 00-1.204 0l-7.119 6.982a4.115 4.115 0 000 5.9 4.314 4.314 0 006.016 0l7.12-6.982a.823.823 0 000-1.18.863.863 0 00-1.204 0l-7.119 6.982a2.588 2.588 0 01-3.61 0 2.47 2.47 0 010-3.54l7.12-6.982z"></path></svg>`;
 
 export const CHECK_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
 
-const SVG_NS = 'http://www.w3.org/2000/svg';
 const MCP_ICON_PATHS = [
   'M15.688 2.343a2.588 2.588 0 00-3.61 0l-9.626 9.44a.863.863 0 01-1.203 0 .823.823 0 010-1.18l9.626-9.44a4.313 4.313 0 016.016 0 4.116 4.116 0 011.204 3.54 4.3 4.3 0 013.609 1.18l.05.05a4.115 4.115 0 010 5.9l-8.706 8.537a.274.274 0 000 .393l1.788 1.754a.823.823 0 010 1.18.863.863 0 01-1.203 0l-1.788-1.753a1.92 1.92 0 010-2.754l8.706-8.538a2.47 2.47 0 000-3.54l-.05-.049a2.588 2.588 0 00-3.607-.003l-7.172 7.034-.002.002-.098.097a.863.863 0 01-1.204 0 .823.823 0 010-1.18l7.273-7.133a2.47 2.47 0 00-.003-3.537z',
   'M14.485 4.703a.823.823 0 000-1.18.863.863 0 00-1.204 0l-7.119 6.982a4.115 4.115 0 000 5.9 4.314 4.314 0 006.016 0l7.12-6.982a.823.823 0 000-1.18.863.863 0 00-1.204 0l-7.119 6.982a2.588 2.588 0 01-3.61 0 2.47 2.47 0 010-3.54l7.12-6.982z',
 ];
 
-function createSvgElement(ownerDocument: Document, tagName: string): SVGElement {
-  return ownerDocument.createElementNS(SVG_NS, tagName);
-}
-
 export function appendMcpIcon(container: HTMLElement): void {
   container.empty();
 
-  const svg = createSvgElement(container.ownerDocument, 'svg');
+  const svg = container.createSvg('svg');
   svg.setAttribute('fill', 'currentColor');
   svg.setAttribute('fill-rule', 'evenodd');
   svg.setAttribute('height', '1em');
   svg.setAttribute('viewBox', '0 0 24 24');
   svg.setAttribute('width', '1em');
 
-  const title = createSvgElement(container.ownerDocument, 'title');
+  const title = svg.createSvg('title');
   title.textContent = 'MCP';
-  svg.appendChild(title);
 
   for (const pathData of MCP_ICON_PATHS) {
-    const path = createSvgElement(container.ownerDocument, 'path');
+    const path = svg.createSvg('path');
     path.setAttribute('d', pathData);
-    svg.appendChild(path);
   }
-
-  container.appendChild(svg);
-}
-
-export function appendCheckIcon(container: HTMLElement): void {
-  container.empty();
-
-  const svg = createSvgElement(container.ownerDocument, 'svg');
-  svg.setAttribute('width', '12');
-  svg.setAttribute('height', '12');
-  svg.setAttribute('viewBox', '0 0 24 24');
-  svg.setAttribute('fill', 'none');
-  svg.setAttribute('stroke', 'currentColor');
-  svg.setAttribute('stroke-width', '3');
-  svg.setAttribute('stroke-linecap', 'round');
-  svg.setAttribute('stroke-linejoin', 'round');
-
-  const polyline = createSvgElement(container.ownerDocument, 'polyline');
-  polyline.setAttribute('points', '20 6 9 17 4 12');
-  svg.appendChild(polyline);
 
   container.appendChild(svg);
 }
@@ -66,6 +40,117 @@ export const CLAUDE_PROVIDER_ICON: ProviderIconSvg = {
   viewBox: '0 -.01 39.5 39.53',
   path: 'm7.75 26.27 7.77-4.36.13-.38-.13-.21h-.38l-1.3-.08-4.44-.12-3.85-.16-3.73-.2-.94-.2-.88-1.16.09-.58.79-.53 1.13.1 2.5.17 3.75.26 2.72.16 4.03.42h.64l.09-.26-.22-.16-.17-.16-3.88-2.63-4.2-2.78-2.2-1.6-1.19-.81-.6-.76-.26-1.66 1.08-1.19 1.45.1.37.1 1.47 1.13 3.14 2.43 4.1 3.02.6.5.24-.17.03-.12-.27-.45-2.23-4.03-2.38-4.1-1.06-1.7-.28-1.02c-.1-.42-.17-.77-.17-1.2l1.23-1.67.68-.22 1.64.22.69.6 1.02 2.33 1.65 3.67 2.56 4.99.75 1.48.4 1.37.15.42h.26v-.24l.21-2.81.39-3.45.38-4.44.13-1.25.62-1.5 1.23-.81.96.46.79 1.13-.11.73-.47 3.05-.92 4.78-.6 3.2h.35l.4-.4 1.62-2.15 2.72-3.4 1.2-1.35 1.4-1.49.9-.71h1.7l1.25 1.86-.56 1.92-1.75 2.22-1.45 1.88-2.08 2.8-1.3 2.24.12.18.31-.03 4.7-1 2.54-.46 3.03-.52 1.37.64.15.65-.54 1.33-3.24.8-3.8.76-5.66 1.34-.07.05.08.1 2.55.24 1.09.06h2.67l4.97.37 1.3.86.78 1.05-.13.8-2 1.02-2.7-.64-6.3-1.5-2.16-.54h-.3v.18l1.8 1.76 3.3 2.98 4.13 3.84.21.95-.53.75-.56-.08-3.63-2.73-1.4-1.23-3.17-2.67h-.21v.28l.73 1.07 3.86 5.8.2 1.78-.28.58-1 .35-1.1-.2-2.26-3.17-2.33-3.57-1.88-3.2-.23.13-1.11 11.95-.52.61-1.2.46-1-.76-.53-1.23.53-2.43.64-3.17.52-2.52.47-3.13.28-1.04-.02-.07-.23.03-2.36 3.24-3.59 4.85-2.84 3.04-.68.27-1.18-.61.11-1.09.66-.97 3.93-5 2.37-3.1 1.53-1.79-.01-.26h-.09l-10.44 6.78-1.86.24-.8-.75.1-1.23.38-.4 3.14-2.16z',
 };
+
+export const KIMI_PROVIDER_ICON: ProviderIconSvg = {
+  kind: 'composite',
+  viewBox: '0 0 24 24',
+  children: [
+    {
+      tag: 'path',
+      attributes: {
+        d: 'M21.846 0a1.923 1.923 0 110 3.846H20.15a.226.226 0 01-.227-.226V1.923C19.923.861 20.784 0 21.846 0z',
+        fill: 'currentColor',
+      },
+    },
+    {
+      tag: 'path',
+      attributes: {
+        d: 'M11.065 11.199l7.257-7.2c.137-.136.06-.41-.116-.41H14.3a.164.164 0 00-.117.051l-7.82 7.756c-.122.12-.302.013-.302-.179V3.82c0-.127-.083-.23-.185-.23H3.186c-.103 0-.186.103-.186.23V19.77c0 .128.083.23.186.23h2.69c.103 0 .186-.102.186-.23v-3.25c0-.069.025-.135.069-.178l2.424-2.406a.158.158 0 01.205-.023l6.484 4.772a7.677 7.677 0 003.453 1.283c.108.012.2-.095.2-.23v-3.06c0-.117-.07-.212-.164-.227a5.028 5.028 0 01-2.027-.807l-5.613-4.064c-.117-.078-.132-.279-.028-.381z',
+        fill: 'currentColor',
+      },
+    },
+  ],
+};
+
+export const DEEPSEEK_PROVIDER_ICON: ProviderIconSvg = {
+  viewBox: '0 0 24 24',
+  path: 'M23.748 4.482c-.254-.124-.364.113-.512.234-.051.039-.094.09-.137.136-.372.397-.806.657-1.373.626-.829-.046-1.537.214-2.163.848-.133-.782-.575-1.248-1.247-1.548-.352-.156-.708-.311-.955-.65-.172-.241-.219-.51-.305-.774-.055-.16-.11-.323-.293-.35-.2-.031-.278.136-.356.276-.313.572-.434 1.202-.422 1.84.027 1.436.633 2.58 1.838 3.393.137.093.172.187.129.323-.082.28-.18.552-.266.833-.055.179-.137.217-.329.14a5.526 5.526 0 01-1.736-1.18c-.857-.828-1.631-1.742-2.597-2.458a11.365 11.365 0 00-.689-.471c-.985-.957.13-1.743.388-1.836.27-.098.093-.432-.779-.428-.872.004-1.67.295-2.687.684a3.055 3.055 0 01-.465.137 9.597 9.597 0 00-2.883-.102c-1.885.21-3.39 1.102-4.497 2.623C.082 8.606-.231 10.684.152 12.85c.403 2.284 1.569 4.175 3.36 5.653 1.858 1.533 3.997 2.284 6.438 2.14 1.482-.085 3.133-.284 4.994-1.86.47.234.962.327 1.78.397.63.059 1.236-.03 1.705-.128.735-.156.684-.837.419-.961-2.155-1.004-1.682-.595-2.113-.926 1.096-1.296 2.746-2.642 3.392-7.003.05-.347.007-.565 0-.845-.004-.17.035-.237.23-.256a4.173 4.173 0 001.545-.475c1.396-.763 1.96-2.015 2.093-3.517.02-.23-.004-.467-.247-.588zM11.581 18c-2.089-1.642-3.102-2.183-3.52-2.16-.392.024-.321.471-.235.763.09.288.207.486.371.739.114.167.192.416-.113.603-.673.416-1.842-.14-1.897-.167-1.361-.802-2.5-1.86-3.301-3.307-.774-1.393-1.224-2.887-1.298-4.482-.02-.386.093-.522.477-.592a4.696 4.696 0 011.529-.039c2.132.312 3.946 1.265 5.468 2.774.868.86 1.525 1.887 2.202 2.891.72 1.066 1.494 2.082 2.48 2.914.348.292.625.514.891.677-.802.09-2.14.11-3.054-.614zm1-6.44a.306.306 0 01.415-.287.302.302 0 01.2.288.306.306 0 01-.31.307.303.303 0 01-.304-.308zm3.11 1.596c-.2.081-.399.151-.59.16a1.245 1.245 0 01-.798-.254c-.274-.23-.47-.358-.552-.758a1.73 1.73 0 01.016-.588c.07-.327-.008-.537-.239-.727-.187-.156-.426-.199-.688-.199a.559.559 0 01-.254-.078c-.11-.054-.2-.19-.114-.358.028-.054.16-.186.192-.21.356-.202.767-.136 1.146.016.352.144.618.408 1.001.782.391.451.462.576.685.914.176.265.336.537.445.848.067.195-.019.354-.25.452z',
+};
+
+export const OPENROUTER_PROVIDER_ICON: ProviderIconSvg = {
+  viewBox: '0 0 24 24',
+  path: 'M16.804 1.957l7.22 4.105v.087L16.73 10.21l.017-2.117-.821-.03c-1.059-.028-1.611.002-2.268.11-1.064.175-2.038.577-3.147 1.352L8.345 11.03c-.284.195-.495.336-.68.455l-.515.322-.397.234.385.23.53.338c.476.314 1.17.796 2.701 1.866 1.11.775 2.083 1.177 3.147 1.352l.3.045c.694.091 1.375.094 2.825.033l.022-2.159 7.22 4.105v.087L16.589 22l.014-1.862-.635.022c-1.386.042-2.137.002-3.138-.162-1.694-.28-3.26-.926-4.881-2.059l-2.158-1.5a21.997 21.997 0 00-.755-.498l-.467-.28a55.927 55.927 0 00-.76-.43C2.908 14.73.563 14.116 0 14.116V9.888l.14.004c.564-.007 2.91-.622 3.809-1.124l1.016-.58.438-.274c.428-.28 1.072-.726 2.686-1.853 1.621-1.133 3.186-1.78 4.881-2.059 1.152-.19 1.974-.213 3.814-.138l.02-1.907z',
+};
+
+function normalizeProviderModelId(modelId: string): string {
+  return (decodeProviderModelSelectionId(modelId)?.modelId ?? modelId).trim().toLowerCase();
+}
+
+function getProviderModelSlug(modelId: string): string {
+  const normalized = normalizeProviderModelId(modelId).replace(/\[1m\]$/, '');
+  return normalized.split('/').pop() ?? normalized;
+}
+
+function isOpenRouterAnthropicModel(modelId: string): boolean {
+  const normalized = normalizeProviderModelId(modelId).replace(/\[1m\]$/, '');
+  const slashIndex = normalized.indexOf('/');
+  if (slashIndex === -1) {
+    return false;
+  }
+
+  return normalized.slice(0, slashIndex) === 'anthropic'
+    && normalized.slice(slashIndex + 1).startsWith('claude-');
+}
+
+export function resolveProviderIconForModelId(modelId: string): ProviderIconSvg | undefined {
+  const selectionOwner = decodeProviderModelSelectionId(modelId)?.providerId;
+  const normalized = normalizeProviderModelId(modelId);
+  const providerId = normalized.includes('/') ? normalized.split('/')[0] : '';
+  const slug = getProviderModelSlug(modelId);
+
+  if (providerId === 'openai' || (selectionOwner === 'claude' && slug.startsWith('gpt-'))) {
+    return OPENAI_PROVIDER_ICON;
+  }
+
+  if (providerId === 'moonshotai' || slug.includes('kimi')) {
+    return KIMI_PROVIDER_ICON;
+  }
+
+  if (providerId === 'deepseek' || slug.includes('deepseek')) {
+    return DEEPSEEK_PROVIDER_ICON;
+  }
+
+  if (providerId === 'openrouter' || providerId === '~anthropic' || isOpenRouterAnthropicModel(modelId)) {
+    return OPENROUTER_PROVIDER_ICON;
+  }
+
+  return undefined;
+}
+
+export function resolveProviderGroupForModelId(modelId: string): string | undefined {
+  const normalized = normalizeProviderModelId(modelId);
+  const providerId = normalized.includes('/') ? normalized.split('/')[0] : '';
+  const slug = getProviderModelSlug(modelId);
+
+  if (providerId === 'openai' || slug.startsWith('gpt-')) {
+    return 'GPT';
+  }
+
+  if (providerId === 'moonshotai' || slug.startsWith('kimi-')) {
+    return 'Kimi';
+  }
+
+  if (providerId === 'openrouter' || providerId === '~anthropic' || isOpenRouterAnthropicModel(modelId)) {
+    return 'OpenRouter';
+  }
+
+  if (providerId === 'deepseek' || slug.includes('deepseek')) {
+    return 'DeepSeek';
+  }
+
+  if (
+    providerId === 'anthropic'
+    || slug.startsWith('claude-')
+    || slug === 'haiku'
+    || slug === 'sonnet'
+    || slug === 'opus'
+    || slug === 'fable'
+  ) {
+    return 'Claude';
+  }
+
+  return undefined;
+}
 
 export const OPENCODE_PROVIDER_ICON: ProviderIconSvg = {
   kind: 'composite',
@@ -118,11 +203,16 @@ export const PI_PROVIDER_ICON: ProviderIconSvg = {
   ],
 };
 
+export const GROK_PROVIDER_ICON: ProviderIconSvg = {
+  viewBox: '0 0 24 24',
+  path: 'M3.25 3h4.18l4.8 6.64L17.88 3h3.17l-7.36 8.65L20.44 21h-4.18l-5.16-7.14L5.02 21H1.85l7.79-9.16L3.25 3Zm3.03 1.7 10.85 14.6h1.28L7.56 4.7H6.28Z',
+};
+
 export interface CreateProviderIconSvgOptions {
   className?: string;
   dataProvider?: string;
   height?: number | string;
-  ownerDocument?: Document;
+  parent?: HTMLElement;
   width?: number | string;
 }
 
@@ -130,8 +220,8 @@ export function createProviderIconSvg(
   icon: ProviderIconSvg,
   options: CreateProviderIconSvgOptions = {},
 ): SVGElement {
-  const ownerDocument = options.ownerDocument ?? window.document;
-  const svg = ownerDocument.createElementNS(SVG_NS, 'svg');
+  const parent = options.parent ?? activeDocument.body;
+  const svg = parent.createSvg('svg');
   svg.setAttribute('viewBox', icon.viewBox);
   svg.setAttribute('fill', 'none');
   svg.setAttribute('aria-hidden', 'true');
@@ -152,27 +242,26 @@ export function createProviderIconSvg(
 
   if (icon.kind === 'composite') {
     for (const child of icon.children) {
-      svg.appendChild(createProviderSvgChild(child, ownerDocument));
+      svg.appendChild(createProviderSvgChild(child, svg));
     }
     return svg;
   }
 
-  const path = ownerDocument.createElementNS(SVG_NS, 'path');
+  const path = svg.createSvg('path');
   path.setAttribute('d', icon.path);
   path.setAttribute('fill', 'currentColor');
-  svg.appendChild(path);
   return svg;
 }
 
-function createProviderSvgChild(child: ProviderSvgChild, ownerDocument: Document): SVGElement {
-  const element = ownerDocument.createElementNS(SVG_NS, child.tag);
+function createProviderSvgChild(child: ProviderSvgChild, parent: SVGElement): SVGElement {
+  const element = parent.createSvg(child.tag);
   for (const [name, value] of Object.entries(child.attributes)) {
     element.setAttribute(name, value);
   }
 
   if (child.tag === 'g') {
     for (const nestedChild of child.children) {
-      element.appendChild(createProviderSvgChild(nestedChild, ownerDocument));
+      element.appendChild(createProviderSvgChild(nestedChild, element));
     }
   }
 

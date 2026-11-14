@@ -3,13 +3,20 @@ import { Setting } from 'obsidian';
 
 import { ProviderSettingsCoordinator } from '../../../core/providers/ProviderSettingsCoordinator';
 import type { ProviderSettingsTabRenderer } from '../../../core/providers/types';
-import { renderEnvironmentSettingsSection } from '../../../features/settings/ui/EnvironmentSettingsSection';
-import { McpSettingsManager } from '../../../features/settings/ui/McpSettingsManager';
 import { t } from '../../../i18n/i18n';
+import { renderEnvironmentSettingsSection } from '../../../shared/settings/EnvironmentSettingsSection';
+import { renderHostnameCliPathSetting } from '../../../shared/settings/HostnameCliPathSetting';
+import { renderNativeMcpSettingsSection } from '../../../shared/settings/NativeMcpSettingsSection';
+import { renderProviderEnablementSetting } from '../../../shared/settings/ProviderEnablementSetting';
+import { renderLastEnabledProviderWarning } from '../../../shared/settings/ProviderModelEnablementWarning';
 import { getHostnameKey } from '../../../utils/env';
-import { expandHomePath } from '../../../utils/path';
+import { normalizeConfiguredCliPath } from '../../../utils/path';
 import { getClaudeWorkspaceServices } from '../app/ClaudeWorkspaceServices';
-import { resolveClaudeModelSelection } from '../modelOptions';
+import {
+  getClaudeModelOptions,
+  resolveClaudeModelEnvironmentTypePreference,
+  resolveClaudeModelSelection,
+} from '../modelOptions';
 import {
   CLAUDE_SAFE_MODES,
   type ClaudeSafeMode,
@@ -27,25 +34,61 @@ export const claudeSettingsTabRenderer: ProviderSettingsTabRenderer = {
     const settingsBag = context.plugin.settings as unknown as Record<string, unknown>;
     const claudeSettings = getClaudeProviderSettings(settingsBag);
 
-    const reconcileActiveClaudeModelSelection = (): void => {
-      const activeProvider = settingsBag.settingsProvider;
+    const reconcileActiveClaudeModelSelection = (settings: Record<string, unknown>): void => {
+      const activeProvider = settings.settingsProvider;
       if (activeProvider !== undefined && activeProvider !== 'claude') {
         return;
       }
 
-      const currentModel = typeof settingsBag.model === 'string' ? settingsBag.model : '';
-      const nextModel = resolveClaudeModelSelection(settingsBag, currentModel);
+      const currentModel = typeof settings.model === 'string' ? settings.model : '';
+      const nextModel = resolveClaudeModelSelection(settings, currentModel);
       if (!nextModel || nextModel === currentModel) {
         return;
       }
 
-      settingsBag.model = nextModel;
-      claudeChatUIConfig.applyModelDefaults(nextModel, settingsBag);
+      settings.model = nextModel;
+      claudeChatUIConfig.applyModelDefaults(nextModel, settings);
     };
 
     // --- Setup ---
 
     new Setting(container).setName(t('settings.setup')).setHeading();
+
+    renderProviderEnablementSetting({
+      container,
+      description: t('settings.providerEnablement.desc', { provider: 'Claude' }),
+      getValue: () => getClaudeProviderSettings(settingsBag).enabled,
+      name: t('settings.providerEnablement.name', { provider: 'Claude' }),
+      onChange: async (value) => {
+        if (!ProviderSettingsCoordinator.canApplyProviderEnablement(
+          settingsBag,
+          'claude',
+          value,
+        )) {
+          lastProviderWarning.showFor();
+          return;
+        }
+
+        let accepted = true;
+        await context.plugin.runProviderExecutionTransition(['claude'], async () => {
+          await context.plugin.mutateSettings((settings) => {
+            accepted = ProviderSettingsCoordinator.applyProviderEnablement(
+              settings,
+              'claude',
+              value,
+            );
+          });
+        });
+        if (accepted) {
+          lastProviderWarning.hide();
+        } else {
+          lastProviderWarning.showFor();
+        }
+        context.notifyProviderModelOptionsChanged('claude');
+      },
+    });
+
+    const lastProviderWarning = renderLastEnabledProviderWarning(container);
 
     const hostnameKey = getHostnameKey();
     const platformDesc = process.platform === 'win32'
@@ -53,19 +96,11 @@ export const claudeSettingsTabRenderer: ProviderSettingsTabRenderer = {
       : t('settings.cliPath.descUnix');
     const cliPathDescription = `${t('settings.cliPath.desc')} ${platformDesc}`;
 
-    const cliPathSetting = new Setting(container)
-      .setName(t('settings.cliPath.name'))
-      .setDesc(cliPathDescription);
-
-    const validationEl = container.createDiv({
-      cls: 'claudian-cli-path-validation claudian-setting-validation claudian-setting-validation-error claudian-hidden',
-    });
-
     const validatePath = (value: string): string | null => {
       const trimmed = value.trim();
       if (!trimmed) return null;
 
-      const expandedPath = expandHomePath(trimmed);
+      const expandedPath = normalizeConfiguredCliPath(trimmed);
 
       if (!fs.existsSync(expandedPath)) {
         return t('settings.cliPath.validation.notExist');
@@ -77,67 +112,95 @@ export const claudeSettingsTabRenderer: ProviderSettingsTabRenderer = {
       return null;
     };
 
-    const updateCliPathValidation = (value: string, inputEl?: HTMLInputElement): boolean => {
-      const error = validatePath(value);
-      if (error) {
-        validationEl.setText(error);
-        validationEl.toggleClass('claudian-hidden', false);
-        if (inputEl) {
-          inputEl.toggleClass('claudian-input-error', true);
+    renderHostnameCliPathSetting({
+      container,
+      description: cliPathDescription,
+      getValue: () => getClaudeProviderSettings(settingsBag).cliPathsByHost[hostnameKey] || '',
+      name: t('settings.cliPath.name'),
+      onChange: async (value) => {
+        const cliPathsByHost = {
+          ...getClaudeProviderSettings(settingsBag).cliPathsByHost,
+        };
+        if (value) {
+          cliPathsByHost[hostnameKey] = value;
+        } else {
+          delete cliPathsByHost[hostnameKey];
         }
-        return false;
-      }
 
-      validationEl.toggleClass('claudian-hidden', true);
-      if (inputEl) {
-        inputEl.toggleClass('claudian-input-error', false);
-      }
-      return true;
-    };
-
-    const currentValue = claudeSettings.cliPathsByHost[hostnameKey] || '';
-    const cliPathsByHost = { ...claudeSettings.cliPathsByHost };
-    let cliPathInputEl: HTMLInputElement | null = null;
-
-    const persistCliPath = async (value: string): Promise<boolean> => {
-      const isValid = updateCliPathValidation(value, cliPathInputEl ?? undefined);
-      if (!isValid) {
-        return false;
-      }
-
-      const trimmed = value.trim();
-      if (trimmed) {
-        cliPathsByHost[hostnameKey] = trimmed;
-      } else {
-        delete cliPathsByHost[hostnameKey];
-      }
-
-      updateClaudeProviderSettings(settingsBag, { cliPathsByHost: { ...cliPathsByHost } });
-      await context.plugin.saveSettings();
-      claudeWorkspace.cliResolver.reset();
-      const view = context.plugin.getView();
-      await view?.getTabManager()?.broadcastToAllTabs(
-        (service) => Promise.resolve(service.cleanup())
-      );
-      return true;
-    };
-
-    cliPathSetting.addText((text) => {
-      const placeholder = process.platform === 'win32'
+        await context.plugin.applyProviderRuntimeSettings(
+          ['claude'],
+          (settings) => {
+            updateClaudeProviderSettings(settings, { cliPathsByHost });
+          },
+          () => claudeWorkspace.cliResolver.reset(),
+        );
+      },
+      placeholder: process.platform === 'win32'
         ? 'D:\\nodejs\\node_global\\node_modules\\@anthropic-ai\\claude-code\\cli-wrapper.cjs'
-        : '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs';
-
-      text
-        .setPlaceholder(placeholder)
-        .setValue(currentValue)
-        .onChange(async (value) => {
-          await persistCliPath(value);
-        });
-      text.inputEl.addClass('claudian-settings-cli-path-input');
-      cliPathInputEl = text.inputEl;
-
-      updateCliPathValidation(currentValue, text.inputEl);
+        : '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli-wrapper.cjs',
+      validate: validatePath,
     });
+
+    // --- Models ---
+
+    new Setting(container).setName(t('settings.models')).setHeading();
+
+    new Setting(container)
+      .setName('Default model')
+      .setDesc('Used when a new conversation needs a Claude fallback model.')
+      .addDropdown((dropdown) => {
+        for (const option of getClaudeModelOptions(settingsBag)) {
+          dropdown.addOption(option.value, option.label);
+        }
+        dropdown
+          .setValue(claudeChatUIConfig.getDefaultModel?.(settingsBag) ?? '')
+          .onChange(async (value) => {
+            await context.plugin.mutateSettings((settings) => {
+              const preference = resolveClaudeModelEnvironmentTypePreference(
+                getClaudeModelOptions(settings),
+                value,
+              );
+              updateClaudeProviderSettings(settings, {
+                defaultModel: preference ?? value,
+              });
+            });
+          });
+      });
+
+    new Setting(container)
+      .setName(t('settings.customModels.name'))
+      .setDesc(t('settings.customModels.desc'))
+      .addTextArea((text) => {
+        let pendingCustomModels = claudeSettings.customModels;
+        let savedCustomModels = claudeSettings.customModels;
+
+        const commitCustomModels = async (): Promise<void> => {
+          if (pendingCustomModels === savedCustomModels) {
+            return;
+          }
+
+          const nextCustomModels = pendingCustomModels;
+          await context.plugin.mutateSettings((settings) => {
+            updateClaudeProviderSettings(settings, { customModels: nextCustomModels });
+            reconcileActiveClaudeModelSelection(settings);
+            ProviderSettingsCoordinator.reconcileTitleGenerationModelSelection(settings);
+          });
+          savedCustomModels = nextCustomModels;
+          context.notifyProviderModelOptionsChanged('claude');
+        };
+
+        text
+          .setPlaceholder(t('settings.customModels.placeholder'))
+          .setValue(claudeSettings.customModels)
+          .onChange((value) => {
+            pendingCustomModels = value;
+          });
+        text.inputEl.rows = 6;
+        text.inputEl.cols = 40;
+        text.inputEl.addEventListener('blur', () => {
+          void commitCustomModels();
+        });
+      });
 
     // --- Safety ---
 
@@ -153,11 +216,12 @@ export const claudeSettingsTabRenderer: ProviderSettingsTabRenderer = {
         dropdown
           .setValue(claudeSettings.safeMode)
           .onChange(async (value) => {
-            updateClaudeProviderSettings(
-              settingsBag,
-              { safeMode: value as ClaudeSafeMode },
-            );
-            await context.plugin.saveSettings();
+            await context.plugin.mutateSettings((settings) => {
+              updateClaudeProviderSettings(
+                settings,
+                { safeMode: value as ClaudeSafeMode },
+              );
+            });
           });
       });
 
@@ -168,93 +232,11 @@ export const claudeSettingsTabRenderer: ProviderSettingsTabRenderer = {
         toggle
           .setValue(claudeSettings.loadUserSettings)
           .onChange(async (value) => {
-            updateClaudeProviderSettings(settingsBag, { loadUserSettings: value });
-            await context.plugin.saveSettings();
+            await context.plugin.mutateSettings((settings) => {
+              updateClaudeProviderSettings(settings, { loadUserSettings: value });
+            });
           })
       );
-
-    // --- Models ---
-
-    new Setting(container).setName(t('settings.models')).setHeading();
-
-    new Setting(container)
-      .setName(t('settings.enableOpus1M.name'))
-      .setDesc(t('settings.enableOpus1M.desc'))
-      .addToggle((toggle) =>
-        toggle
-          .setValue(claudeSettings.enableOpus1M)
-          .onChange(async (value) => {
-            updateClaudeProviderSettings(settingsBag, { enableOpus1M: value });
-            context.plugin.normalizeModelVariantSettings();
-            await context.plugin.saveSettings();
-            context.refreshModelSelectors();
-          })
-      );
-
-    new Setting(container)
-      .setName(t('settings.enableSonnet1M.name'))
-      .setDesc(t('settings.enableSonnet1M.desc'))
-      .addToggle((toggle) =>
-        toggle
-          .setValue(claudeSettings.enableSonnet1M)
-          .onChange(async (value) => {
-            updateClaudeProviderSettings(settingsBag, { enableSonnet1M: value });
-            context.plugin.normalizeModelVariantSettings();
-            await context.plugin.saveSettings();
-            context.refreshModelSelectors();
-          })
-      );
-
-    new Setting(container)
-      .setName(t('settings.customModels.name'))
-      .setDesc(t('settings.customModels.desc'))
-      .addTextArea((text) => {
-        let pendingCustomModels = claudeSettings.customModels;
-        let savedCustomModels = claudeSettings.customModels;
-
-        const commitCustomModels = async (): Promise<void> => {
-          const previousCustomModels = savedCustomModels;
-          const previousModel = typeof settingsBag.model === 'string' ? settingsBag.model : '';
-          const previousTitleModel = typeof settingsBag.titleGenerationModel === 'string'
-            ? settingsBag.titleGenerationModel
-            : '';
-
-          if (pendingCustomModels !== savedCustomModels) {
-            updateClaudeProviderSettings(settingsBag, { customModels: pendingCustomModels });
-            savedCustomModels = pendingCustomModels;
-          }
-
-          reconcileActiveClaudeModelSelection();
-          const didReconcileTitleModel = ProviderSettingsCoordinator
-            .reconcileTitleGenerationModelSelection(settingsBag);
-          const nextModel = typeof settingsBag.model === 'string' ? settingsBag.model : '';
-          const nextTitleModel = typeof settingsBag.titleGenerationModel === 'string'
-            ? settingsBag.titleGenerationModel
-            : '';
-          const didModelSelectionChange = previousModel !== nextModel;
-          const didCustomModelsChange = previousCustomModels !== savedCustomModels;
-
-          if (!didCustomModelsChange && !didModelSelectionChange && !didReconcileTitleModel
-            && previousTitleModel === nextTitleModel) {
-            return;
-          }
-
-          await context.plugin.saveSettings();
-          context.refreshModelSelectors();
-        };
-
-        text
-          .setPlaceholder(t('settings.customModels.placeholder'))
-          .setValue(claudeSettings.customModels)
-          .onChange((value) => {
-            pendingCustomModels = value;
-          });
-        text.inputEl.rows = 6;
-        text.inputEl.cols = 40;
-        text.inputEl.addEventListener('blur', () => {
-          void commitCustomModels();
-        });
-      });
 
     // --- Slash Commands ---
 
@@ -272,7 +254,7 @@ export const claudeSettingsTabRenderer: ProviderSettingsTabRenderer = {
     new SlashCommandSettings(
       slashCommandsContainer,
       context.plugin.app,
-      claudeWorkspace.commandCatalog,
+      claudeWorkspace.vaultCommandRepository,
     );
 
     context.renderHiddenProviderCommandSetting(container, 'claude', {
@@ -300,25 +282,13 @@ export const claudeSettingsTabRenderer: ProviderSettingsTabRenderer = {
 
     // --- MCP Servers ---
 
-    new Setting(container).setName(t('settings.mcpServers.name')).setHeading();
-
-    const mcpDesc = container.createDiv({ cls: 'claudian-mcp-settings-desc' });
-    mcpDesc.createEl('p', {
-      text: t('settings.mcpServers.desc'),
-      cls: 'setting-item-description',
-    });
-
-    const mcpContainer = container.createDiv({ cls: 'claudian-mcp-container' });
-    new McpSettingsManager(mcpContainer, {
-      app: context.plugin.app,
-      mcpStorage: claudeWorkspace.mcpStorage,
-      broadcastMcpReload: async () => {
-        for (const view of context.plugin.getAllViews()) {
-          await view.getTabManager()?.broadcastToAllTabs(
-            (service) => service.reloadMcpServers(),
-          );
-        }
-      },
+    renderNativeMcpSettingsSection(container, {
+      descriptionAfterCommand: t('settings.mcpServers.descAfterCommand'),
+      descriptionBeforeCommand: t('settings.mcpServers.descBeforeCommand'),
+      documentationLabel: t('settings.mcpServers.learnMore'),
+      documentationUrl: 'https://code.claude.com/docs/en/mcp',
+      heading: t('settings.mcpServers.name'),
+      setupCommand: 'claude mcp add',
     });
 
     // --- Plugins ---
@@ -336,15 +306,9 @@ export const claudeSettingsTabRenderer: ProviderSettingsTabRenderer = {
       pluginManager: claudeWorkspace.pluginManager,
       agentManager: claudeWorkspace.agentManager,
       restartTabs: async () => {
-        const view = context.plugin.getView();
-        const tabManager = view?.getTabManager();
-        if (!tabManager) {
-          return;
-        }
-
-        await tabManager.broadcastToAllTabs(
-          async (service) => { await service.ensureReady({ force: true }); },
-        );
+        await context.plugin.runProviderExecutionTransition(['claude'], async () => {
+          await claudeWorkspace.agentManager.loadAgents();
+        });
       },
     });
 
@@ -372,8 +336,9 @@ export const claudeSettingsTabRenderer: ProviderSettingsTabRenderer = {
         toggle
           .setValue(claudeSettings.enableChrome)
           .onChange(async (value) => {
-            updateClaudeProviderSettings(settingsBag, { enableChrome: value });
-            await context.plugin.saveSettings();
+            await context.plugin.mutateSettings((settings) => {
+              updateClaudeProviderSettings(settings, { enableChrome: value });
+            });
           })
       );
 
@@ -395,8 +360,9 @@ export const claudeSettingsTabRenderer: ProviderSettingsTabRenderer = {
                 return;
               }
             }
-            updateClaudeProviderSettings(settingsBag, { enableBangBash: value });
-            await context.plugin.saveSettings();
+            await context.plugin.mutateSettings((settings) => {
+              updateClaudeProviderSettings(settings, { enableBangBash: value });
+            });
           })
       );
 

@@ -119,6 +119,13 @@ let customMockMessages: any[] | null = null;
 let appendResultMessage = true;
 let lastOptions: Options | undefined;
 let mockSupportedCommands: Array<{ name: string; description: string; argumentHint?: string }> = [];
+let mockSupportedCommandsImplementation: (() => Promise<Array<{
+  name: string;
+  description: string;
+  argumentHint?: string;
+}>>) | null = null;
+let mockContextUsage: { rawMaxTokens: number } | null = null;
+let mockContextUsageImplementation: (() => Promise<{ rawMaxTokens: number }>) | null = null;
 let lastResponse: (AsyncGenerator<any> & {
   interrupt: jest.Mock;
   setModel: jest.Mock;
@@ -127,6 +134,7 @@ let lastResponse: (AsyncGenerator<any> & {
   applyFlagSettings: jest.Mock;
   setMcpServers: jest.Mock;
   supportedCommands: jest.Mock;
+  getContextUsage: jest.Mock;
 }) | null = null;
 
 // Crash simulation control
@@ -145,6 +153,9 @@ export function resetMockMessages() {
   appendResultMessage = true;
   lastOptions = undefined;
   mockSupportedCommands = [];
+  mockSupportedCommandsImplementation = null;
+  mockContextUsage = null;
+  mockContextUsageImplementation = null;
   lastResponse = null;
   shouldThrowOnIteration = false;
   throwAfterChunks = 0;
@@ -155,6 +166,26 @@ export function setMockSupportedCommands(
   commands: Array<{ name: string; description: string; argumentHint?: string }>
 ) {
   mockSupportedCommands = commands;
+}
+
+export function setMockSupportedCommandsImplementation(
+  implementation: () => Promise<Array<{
+    name: string;
+    description: string;
+    argumentHint?: string;
+  }>>,
+) {
+  mockSupportedCommandsImplementation = implementation;
+}
+
+export function setMockContextUsage(contextUsage: { rawMaxTokens: number } | null) {
+  mockContextUsage = contextUsage;
+}
+
+export function setMockContextUsageImplementation(
+  implementation: (() => Promise<{ rawMaxTokens: number }>) | null,
+) {
+  mockContextUsageImplementation = implementation;
 }
 
 /**
@@ -227,7 +258,8 @@ function getMessagesForPrompt(): any[] {
 async function* emitMessages(messages: any[], options: Options) {
   let chunksEmitted = 0;
 
-  for (const msg of messages) {
+  for (const pendingMessage of messages) {
+    const msg = await pendingMessage;
     // Check if we should throw (crash simulation)
     if (shouldThrowOnIteration && chunksEmitted >= throwAfterChunks) {
       // Reset for next query (allows recovery to work)
@@ -302,6 +334,7 @@ export function query({ prompt, options }: { prompt: any; options: Options }): A
     applyFlagSettings: jest.Mock;
     setMcpServers: jest.Mock;
     supportedCommands: jest.Mock;
+    getContextUsage: jest.Mock;
   };
   gen.interrupt = jest.fn().mockResolvedValue(undefined);
   // Dynamic update methods for persistent queries
@@ -310,7 +343,18 @@ export function query({ prompt, options }: { prompt: any; options: Options }): A
   gen.setPermissionMode = jest.fn().mockResolvedValue(undefined);
   gen.applyFlagSettings = jest.fn().mockResolvedValue(undefined);
   gen.setMcpServers = jest.fn().mockResolvedValue({ added: [], removed: [], errors: {} });
-  gen.supportedCommands = jest.fn().mockResolvedValue(mockSupportedCommands);
+  gen.supportedCommands = jest.fn().mockImplementation(() => (
+    mockSupportedCommandsImplementation
+      ? mockSupportedCommandsImplementation()
+      : Promise.resolve(mockSupportedCommands)
+  ));
+  gen.getContextUsage = jest.fn().mockImplementation(() => (
+    mockContextUsageImplementation
+      ? mockContextUsageImplementation()
+      : mockContextUsage
+      ? Promise.resolve(mockContextUsage)
+      : Promise.reject(new Error('Context usage unavailable'))
+  ));
   lastResponse = gen;
 
   return gen;

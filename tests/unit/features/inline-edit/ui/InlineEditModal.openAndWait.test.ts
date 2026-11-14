@@ -1,31 +1,13 @@
 import '@/providers';
 
-import { createMockEl } from '@test/helpers/mockElement';
+import { createMockEl } from '@test/helpers/MockElement';
 import { MarkdownRenderer, Notice } from 'obsidian';
 
 import { ProviderRegistry } from '@/core/providers/ProviderRegistry';
+import { ProviderWorkspaceRegistry } from '@/core/providers/ProviderWorkspaceRegistry';
 import { type InlineEditContext, InlineEditModal } from '@/features/inline-edit/ui/InlineEditModal';
 import { VaultFolderCache } from '@/shared/mention/VaultMentionCache';
 import * as editorUtils from '@/utils/editor';
-
-const mentionDropdownCtor = jest.fn();
-jest.mock('@/shared/mention/MentionDropdownController', () => ({
-  MentionDropdownController: function MockMentionDropdownController(...args: any[]) {
-    mentionDropdownCtor(...args);
-    return {
-      handleInputChange: jest.fn(),
-      handleKeydown: jest.fn().mockReturnValue(false),
-      destroy: jest.fn(),
-    };
-  },
-}));
-
-jest.mock('@/shared/components/SlashCommandDropdown', () => ({
-  SlashCommandDropdown: jest.fn().mockImplementation(() => ({
-    handleKeydown: jest.fn().mockReturnValue(false),
-    destroy: jest.fn(),
-  })),
-}));
 
 jest.mock('@/utils/externalContextScanner', () => ({
   externalContextScanner: {
@@ -41,9 +23,27 @@ function createDeferred(): { promise: Promise<void>; resolve: () => void } {
   return { promise, resolve };
 }
 
+function createInertInlineEditService() {
+  return {
+    cancel: jest.fn(),
+    continueConversation: jest.fn(),
+    editText: jest.fn(),
+    resetConversation: jest.fn(),
+    setModelOverride: jest.fn(),
+  };
+}
+
 describe('InlineEditModal - openAndWait', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    jest.spyOn(ProviderWorkspaceRegistry, 'ensureInitialized').mockResolvedValue(undefined);
+    jest
+      .spyOn(ProviderRegistry, 'createInlineEditService')
+      .mockReturnValue(createInertInlineEditService() as any);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
   });
 
   it('uses editorCallback references first and falls back to view.editor before rejecting', async () => {
@@ -88,6 +88,97 @@ describe('InlineEditModal - openAndWait', () => {
     );
   });
 
+  it('uses an enabled settings provider when no chat tab is open', async () => {
+    const editor = {} as any;
+    const app = {} as any;
+    const plugin = {
+      settings: {
+        settingsProvider: 'claude',
+        providerConfigs: {
+          claude: { enabled: false },
+          codex: { enabled: true },
+        },
+      },
+      getView: jest.fn().mockReturnValue(null),
+    } as any;
+    plugin.providerHost = plugin;
+    const view = { editor } as any;
+    const editContext: InlineEditContext = {
+      mode: 'cursor',
+      cursorContext: {
+        beforeCursor: '',
+        afterCursor: '',
+        isInbetween: true,
+        line: 0,
+        column: 0,
+      },
+    };
+
+    jest.spyOn(editorUtils, 'getEditorView').mockReturnValue({} as any);
+    jest.spyOn(ProviderWorkspaceRegistry, 'ensureInitialized')
+      .mockRejectedValue(new Error('stop after provider resolution'));
+
+    const modal = new InlineEditModal(app, plugin, editor, view, editContext, 'note.md');
+
+    await expect(modal.openAndWait()).resolves.toEqual({ decision: 'reject' });
+    expect(ProviderWorkspaceRegistry.ensureInitialized).toHaveBeenCalledWith(
+      plugin,
+      'codex',
+      'inline-edit',
+    );
+  });
+
+  it('uses an enabled settings provider when the active conversation provider is disabled', async () => {
+    const editor = {} as any;
+    const app = {} as any;
+    const plugin = {
+      settings: {
+        settingsProvider: 'codex',
+        providerConfigs: {
+          claude: { enabled: false },
+          codex: { enabled: true },
+        },
+      },
+      getConversationSync: jest.fn().mockReturnValue({
+        id: 'claude-conversation',
+        providerId: 'claude',
+        selectedModel: 'sonnet',
+      }),
+      getView: jest.fn().mockReturnValue({
+        getActiveTab: jest.fn().mockReturnValue({
+          conversationId: 'claude-conversation',
+          providerId: 'claude',
+          selectedModel: 'sonnet',
+        }),
+      }),
+    } as any;
+    plugin.providerHost = plugin;
+    const view = { editor } as any;
+    const editContext: InlineEditContext = {
+      mode: 'cursor',
+      cursorContext: {
+        beforeCursor: '',
+        afterCursor: '',
+        isInbetween: true,
+        line: 0,
+        column: 0,
+      },
+    };
+
+    jest.spyOn(editorUtils, 'getEditorView').mockReturnValue({} as any);
+    jest.spyOn(ProviderWorkspaceRegistry, 'ensureInitialized')
+      .mockRejectedValue(new Error('stop after provider resolution'));
+
+    const modal = new InlineEditModal(app, plugin, editor, view, editContext, 'note.md');
+
+    await expect(modal.openAndWait()).resolves.toEqual({ decision: 'reject' });
+    expect(ProviderWorkspaceRegistry.ensureInitialized).toHaveBeenCalledWith(
+      plugin,
+      'codex',
+      'inline-edit',
+    );
+  });
+
   it('wires mention getCachedVaultFolders through VaultFolderCache.getFolders', async () => {
     const originalDocument = (global as any).document;
     (global as any).document = {
@@ -116,6 +207,7 @@ describe('InlineEditModal - openAndWait', () => {
         },
         getSdkCommands: jest.fn().mockReturnValue([]),
       } as any;
+      plugin.providerHost = plugin;
       const editor = {} as any;
       const view = { editor } as any;
 
@@ -169,9 +261,9 @@ describe('InlineEditModal - openAndWait', () => {
 
       const modal = new InlineEditModal(app, plugin, editor, view, editContext, 'note.md');
       const resultPromise = modal.openAndWait();
+      await Promise.resolve();
 
-      expect(mentionDropdownCtor).toHaveBeenCalled();
-      const callbacks = mentionDropdownCtor.mock.calls[0]?.[2];
+      const callbacks = widgetRef?.mentionSource?.callbacks;
       expect(callbacks).toBeDefined();
       expect(callbacks.getCachedVaultFolders()).toEqual([{ name: 'src', path: 'src' }]);
       expect(getFoldersSpy).toHaveBeenCalledTimes(1);
@@ -211,6 +303,9 @@ describe('InlineEditModal - openAndWait', () => {
             claude: ['commit'],
             codex: ['analyze'],
           },
+          providerConfigs: {
+            codex: { enabled: true },
+          },
         },
         getConversationSync: jest.fn().mockReturnValue(null),
         getView: jest.fn().mockReturnValue({
@@ -221,6 +316,17 @@ describe('InlineEditModal - openAndWait', () => {
           }),
         }),
       } as any;
+      plugin.providerHost = plugin;
+      jest.spyOn(ProviderWorkspaceRegistry, 'getCommandCatalog').mockReturnValue({
+        getDropdownConfig: jest.fn().mockReturnValue({
+          providerId: 'codex',
+          triggerChars: ['/', '$'],
+          builtInPrefix: '/',
+          skillPrefix: '$',
+          commandPrefix: '/',
+        }),
+        listDropdownEntries: jest.fn().mockResolvedValue([]),
+      } as any);
       const editor = {} as any;
       const view = { editor } as any;
 
@@ -269,10 +375,16 @@ describe('InlineEditModal - openAndWait', () => {
 
       const modal = new InlineEditModal(app, plugin, editor, view, editContext, 'note.md');
       const resultPromise = modal.openAndWait();
+      await Promise.resolve();
 
-      const { SlashCommandDropdown } = jest.requireMock('@/shared/components/SlashCommandDropdown');
-      const constructorCall = SlashCommandDropdown.mock.calls[0];
-      expect(Array.from(constructorCall[3].hiddenCommands)).toEqual(['analyze']);
+      expect(ProviderWorkspaceRegistry.ensureInitialized).toHaveBeenCalledWith(
+        plugin,
+        'codex',
+        'inline-edit',
+      );
+      expect(Array.from(widgetRef?.slashSource?.hiddenCommands ?? [])).toEqual(['analyze']);
+      expect(widgetRef?.slashSource?.includeBuiltIns).toBe(false);
+      expect(widgetRef?.slashSource?.discovery).toBeDefined();
 
       widgetRef?.reject();
       await expect(resultPromise).resolves.toEqual({ decision: 'reject' });
@@ -316,6 +428,12 @@ describe('InlineEditModal - openAndWait', () => {
             claude: [],
             opencode: [],
           },
+          providerConfigs: {
+            opencode: {
+              enabled: true,
+              visibleModels: ['anthropic/claude-sonnet-4'],
+            },
+          },
         },
         getConversationSync: jest.fn().mockReturnValue(null),
         getView: jest.fn().mockReturnValue({
@@ -330,6 +448,7 @@ describe('InlineEditModal - openAndWait', () => {
           }),
         }),
       } as any;
+      plugin.providerHost = plugin;
       const editor = {} as any;
       const view = { editor } as any;
 
@@ -380,9 +499,129 @@ describe('InlineEditModal - openAndWait', () => {
 
       const modal = new InlineEditModal(app, plugin, editor, view, editContext, 'note.md');
       const resultPromise = modal.openAndWait();
+      await Promise.resolve();
 
       expect(providerSpy).toHaveBeenCalledWith(plugin, 'opencode');
       expect(inlineEditService.setModelOverride).toHaveBeenCalledWith('opencode:openai/gpt-5.4');
+
+      widgetRef.reject();
+      await expect(resultPromise).resolves.toEqual({ decision: 'reject' });
+      getEditorViewSpy.mockRestore();
+      providerSpy.mockRestore();
+    } finally {
+      (global as any).document = originalDocument;
+    }
+  });
+
+  it('passes the bound conversation model into inline edit services before runtime initialization', async () => {
+    const originalDocument = (global as any).document;
+    (global as any).document = {
+      body: createMockEl('body'),
+      createElement: (tagName: string) => createMockEl(tagName),
+      addEventListener: jest.fn(),
+      removeEventListener: jest.fn(),
+    };
+
+    try {
+      const app = {
+        vault: {
+          getFiles: jest.fn().mockReturnValue([]),
+          getAllLoadedFiles: jest.fn().mockReturnValue([]),
+        },
+        workspace: {
+          getActiveViewOfType: jest.fn(),
+        },
+      } as any;
+      const inlineEditService = {
+        cancel: jest.fn(),
+        continueConversation: jest.fn(),
+        editText: jest.fn(),
+        resetConversation: jest.fn(),
+        setModelOverride: jest.fn(),
+      };
+      const providerSpy = jest
+        .spyOn(ProviderRegistry, 'createInlineEditService')
+        .mockReturnValue(inlineEditService as any);
+      const conversation = {
+        id: 'conv-1',
+        providerId: 'opencode',
+        selectedModel: 'opencode:anthropic/claude-sonnet-4',
+      };
+      const plugin = {
+        settings: {
+          hiddenProviderCommands: {
+            claude: [],
+            opencode: [],
+          },
+          providerConfigs: {
+            opencode: { enabled: true },
+          },
+        },
+        getConversationSync: jest.fn().mockReturnValue(conversation),
+        getView: jest.fn().mockReturnValue({
+          getActiveTab: jest.fn().mockReturnValue({
+            conversationId: 'conv-1',
+            draftModel: null,
+            providerId: 'opencode',
+            service: null,
+          }),
+        }),
+      } as any;
+      plugin.providerHost = plugin;
+      const editor = {} as any;
+      const view = { editor } as any;
+
+      let widgetRef: any = null;
+      const dispatch = jest.fn((transaction: any) => {
+        const effects = Array.isArray(transaction?.effects)
+          ? transaction.effects
+          : transaction?.effects
+            ? [transaction.effects]
+            : [];
+        for (const effect of effects) {
+          const widget = effect?.value?.widget;
+          if (widget && typeof widget.createInputDOM === 'function') {
+            widgetRef = widget;
+            widget.createInputDOM();
+          }
+        }
+      });
+      const editorView = {
+        state: {
+          doc: {
+            line: jest.fn(() => ({ from: 0 })),
+            lineAt: jest.fn(() => ({ from: 0 })),
+          },
+        },
+        dispatch,
+        dom: {
+          ownerDocument: (global as any).document,
+          addEventListener: jest.fn(),
+          removeEventListener: jest.fn(),
+        },
+      } as any;
+
+      const getEditorViewSpy = jest
+        .spyOn(editorUtils, 'getEditorView')
+        .mockReturnValue(editorView);
+
+      const editContext: InlineEditContext = {
+        mode: 'cursor',
+        cursorContext: {
+          beforeCursor: '',
+          afterCursor: '',
+          isInbetween: true,
+          line: 0,
+          column: 0,
+        },
+      };
+
+      const modal = new InlineEditModal(app, plugin, editor, view, editContext, 'note.md');
+      const resultPromise = modal.openAndWait();
+      await Promise.resolve();
+
+      expect(providerSpy).toHaveBeenCalledWith(plugin, 'opencode');
+      expect(inlineEditService.setModelOverride).toHaveBeenCalledWith('opencode:anthropic/claude-sonnet-4');
 
       widgetRef.reject();
       await expect(resultPromise).resolves.toEqual({ decision: 'reject' });
@@ -424,6 +663,7 @@ describe('InlineEditModal - openAndWait', () => {
         },
         getSdkCommands: jest.fn().mockReturnValue([]),
       } as any;
+      plugin.providerHost = plugin;
       const editor = {} as any;
       const view = { editor } as any;
 
@@ -498,8 +738,9 @@ describe('InlineEditModal - openAndWait', () => {
         () => ['/external']
       );
       const resultPromise = modal.openAndWait();
+      await Promise.resolve();
 
-      const callbacks = mentionDropdownCtor.mock.calls[0]?.[2];
+      const callbacks = widgetRef?.mentionSource?.callbacks;
       expect(callbacks.getCachedVaultFiles()).toEqual([]);
       expect(callbacks.getCachedVaultFiles()).toEqual([]);
 
@@ -566,6 +807,7 @@ describe('InlineEditModal - openAndWait', () => {
         },
         getSdkCommands: jest.fn().mockReturnValue([]),
       } as any;
+      plugin.providerHost = plugin;
       const editor = {} as any;
       const view = { editor } as any;
 
@@ -616,6 +858,7 @@ describe('InlineEditModal - openAndWait', () => {
 
       const modal = new InlineEditModal(app, plugin, editor, view, editContext, 'note.md');
       const resultPromise = modal.openAndWait();
+      await Promise.resolve();
 
       const editTextMock = jest.fn().mockResolvedValue({
         success: true,
@@ -671,6 +914,7 @@ describe('InlineEditModal - openAndWait', () => {
         },
         getSdkCommands: jest.fn().mockReturnValue([]),
       } as any;
+      plugin.providerHost = plugin;
       const editor = {} as any;
       const view = { editor } as any;
 
@@ -745,6 +989,7 @@ describe('InlineEditModal - openAndWait', () => {
         () => ['/external']
       );
       const resultPromise = modal.openAndWait();
+      await Promise.resolve();
 
       const editTextMock = jest.fn().mockResolvedValue({
         success: true,
@@ -802,6 +1047,7 @@ describe('InlineEditModal - openAndWait', () => {
         },
         getSdkCommands: jest.fn().mockReturnValue([]),
       } as any;
+      plugin.providerHost = plugin;
       const editor = {} as any;
       const view = { editor } as any;
 
@@ -852,6 +1098,7 @@ describe('InlineEditModal - openAndWait', () => {
 
       const modal = new InlineEditModal(app, plugin, editor, view, editContext, 'note.md');
       const resultPromise = modal.openAndWait();
+      await Promise.resolve();
 
       const editTextMock = jest.fn().mockResolvedValue({
         success: true,
@@ -907,6 +1154,7 @@ describe('InlineEditModal - openAndWait', () => {
         },
         getSdkCommands: jest.fn().mockReturnValue([]),
       } as any;
+      plugin.providerHost = plugin;
       const editor = {} as any;
       const view = { editor } as any;
 
@@ -981,6 +1229,7 @@ describe('InlineEditModal - openAndWait', () => {
         () => ['/external']
       );
       const resultPromise = modal.openAndWait();
+      await Promise.resolve();
 
       const editTextMock = jest.fn().mockResolvedValue({
         success: true,
@@ -1036,6 +1285,7 @@ describe('InlineEditModal - openAndWait', () => {
         },
         getSdkCommands: jest.fn().mockReturnValue([]),
       } as any;
+      plugin.providerHost = plugin;
       const editor = {} as any;
       const view = { editor } as any;
 
@@ -1086,6 +1336,7 @@ describe('InlineEditModal - openAndWait', () => {
 
       const modal = new InlineEditModal(app, plugin, editor, view, editContext, 'math/note.md');
       const resultPromise = modal.openAndWait();
+      await Promise.resolve();
 
       (MarkdownRenderer.renderMarkdown as jest.Mock).mockClear();
       widgetRef.showAgentReply('Should this use $Z(f)$?');
@@ -1136,6 +1387,7 @@ describe('InlineEditModal - openAndWait', () => {
         },
         getSdkCommands: jest.fn().mockReturnValue([]),
       } as any;
+      plugin.providerHost = plugin;
       const editor = {} as any;
       const view = { editor } as any;
 
@@ -1198,6 +1450,7 @@ describe('InlineEditModal - openAndWait', () => {
 
       const modal = new InlineEditModal(app, plugin, editor, view, editContext, 'math/note.md');
       const resultPromise = modal.openAndWait();
+      await Promise.resolve();
 
       widgetRef.showAgentReply('First clarification');
       widgetRef.showAgentReply('Second clarification');
@@ -1226,7 +1479,7 @@ describe('InlineEditModal - openAndWait', () => {
     }
   });
 
-  it('adds rendered preview text to inline edit diff effects', async () => {
+  it('renders accept and reject controls in the block preview', async () => {
     const originalDocument = (global as any).document;
     (global as any).document = {
       body: createMockEl('body'),
@@ -1255,16 +1508,11 @@ describe('InlineEditModal - openAndWait', () => {
         },
         getSdkCommands: jest.fn().mockReturnValue([]),
       } as any;
-      const editor = {
-        getCursor: jest.fn((which: string) => which === 'from'
-          ? { line: 0, ch: 0 }
-          : { line: 0, ch: 3 }),
-        getSelection: jest.fn().mockReturnValue('old'),
-      } as any;
+      plugin.providerHost = plugin;
+      const editor = {} as any;
       const view = { editor } as any;
 
       let widgetRef: any = null;
-      let previewText: string | undefined;
       const dispatch = jest.fn((transaction: any) => {
         const effects = Array.isArray(transaction?.effects)
           ? transaction.effects
@@ -1272,8 +1520,132 @@ describe('InlineEditModal - openAndWait', () => {
             ? [transaction.effects]
             : [];
         for (const effect of effects) {
+          const widget = effect?.value?.widget;
+          if (widget && typeof widget.createInputDOM === 'function') {
+            widgetRef = widget;
+            widget.createInputDOM();
+          }
+        }
+      });
+      const editorView = {
+        state: {
+          doc: {
+            line: jest.fn(() => ({ from: 0 })),
+            lineAt: jest.fn(() => ({ from: 0, number: 1 })),
+          },
+        },
+        dispatch,
+        dom: {
+          ownerDocument: (global as any).document,
+          addEventListener: jest.fn(),
+          removeEventListener: jest.fn(),
+        },
+      } as any;
+
+      const getEditorViewSpy = jest
+        .spyOn(editorUtils, 'getEditorView')
+        .mockReturnValue(editorView);
+
+      const editContext: InlineEditContext = {
+        mode: 'cursor',
+        cursorContext: {
+          beforeCursor: '',
+          afterCursor: '',
+          isInbetween: true,
+          line: 0,
+          column: 0,
+        },
+      };
+
+      const modal = new InlineEditModal(app, plugin, editor, view, editContext, 'math/note.md');
+      const resultPromise = modal.openAndWait();
+      await Promise.resolve();
+
+      const rejectSpy = jest.spyOn(widgetRef, 'reject').mockImplementation(() => {});
+      const acceptSpy = jest.spyOn(widgetRef, 'accept').mockImplementation(() => {});
+
+      const previewEl = widgetRef.createDiffPreviewDOM([
+        { type: 'insert', text: 'Updated text' },
+      ]);
+      const actionBar = previewEl.querySelector('.claudian-inline-preview-actions');
+      const actionButtons = previewEl.querySelectorAll('.claudian-inline-preview-action');
+
+      expect(actionBar).not.toBeNull();
+      expect(actionButtons).toHaveLength(2);
+      expect(actionButtons[0].textContent).toBe('Reject');
+      expect(actionButtons[1].textContent).toBe('Accept');
+
+      actionButtons[0].click();
+      actionButtons[1].click();
+
+      expect(rejectSpy).toHaveBeenCalledTimes(1);
+      expect(acceptSpy).toHaveBeenCalledTimes(1);
+
+      rejectSpy.mockRestore();
+      acceptSpy.mockRestore();
+      widgetRef.reject();
+      await expect(resultPromise).resolves.toEqual({ decision: 'reject' });
+      getEditorViewSpy.mockRestore();
+    } finally {
+      (global as any).document = originalDocument;
+    }
+  });
+
+  it('renders markdown diff documents with block context', async () => {
+    const originalDocument = (global as any).document;
+    (global as any).document = {
+      body: createMockEl('body'),
+      createElement: (tagName: string) => createMockEl(tagName),
+      addEventListener: jest.fn(),
+      removeEventListener: jest.fn(),
+    };
+
+    try {
+      const app = {
+        vault: {
+          getFiles: jest.fn().mockReturnValue([]),
+          getAllLoadedFiles: jest.fn().mockReturnValue([]),
+        },
+        workspace: {
+          getActiveViewOfType: jest.fn(),
+        },
+      } as any;
+      const plugin = {
+        settings: {
+          hiddenProviderCommands: {
+            claude: [],
+            codex: [],
+          },
+          mediaFolder: '',
+        },
+        getSdkCommands: jest.fn().mockReturnValue([]),
+      } as any;
+      const oldMarkdown = '```ts\nconst value = 1;\n```';
+      const newMarkdown = '```ts\nconst value = 2;\n```';
+      plugin.providerHost = plugin;
+      const editor = {
+        getCursor: jest.fn((which: string) => which === 'from'
+          ? { line: 0, ch: 0 }
+          : { line: 0, ch: 3 }),
+        getSelection: jest.fn().mockReturnValue(oldMarkdown),
+      } as any;
+      const view = { editor } as any;
+
+      let widgetRef: any = null;
+      let diffOps: Array<{ type: string; text: string }> | undefined;
+      let hasPreviewText = false;
+      const dispatch = jest.fn((transaction: any) => {
+        const effects = Array.isArray(transaction?.effects)
+          ? transaction.effects
+          : transaction?.effects
+            ? [transaction.effects]
+            : [];
+        for (const effect of effects) {
+          if (effect?.value?.diffOps) {
+            diffOps = effect.value.diffOps;
+          }
           if (effect?.value?.previewText) {
-            previewText = effect.value.previewText;
+            hasPreviewText = true;
           }
 
           const widget = effect?.value?.widget;
@@ -1304,15 +1676,16 @@ describe('InlineEditModal - openAndWait', () => {
 
       const editContext: InlineEditContext = {
         mode: 'selection',
-        selectedText: 'old',
+        selectedText: oldMarkdown,
       };
 
       const modal = new InlineEditModal(app, plugin, editor, view, editContext, 'math/note.md');
       const resultPromise = modal.openAndWait();
+      await Promise.resolve();
       widgetRef.inlineEditService = {
         editText: jest.fn().mockResolvedValue({
           success: true,
-          editedText: '**new** $x^2$',
+          editedText: newMarkdown,
         }),
         continueConversation: jest.fn(),
         cancel: jest.fn(),
@@ -1322,7 +1695,39 @@ describe('InlineEditModal - openAndWait', () => {
       widgetRef.inputEl.value = 'Improve the statement';
       await widgetRef.generate();
 
-      expect(previewText).toBe('**new** $x^2$');
+      expect(diffOps).toEqual([
+        { type: 'equal', text: '```ts\n' },
+        { type: 'delete', text: 'const value = 1;\n' },
+        { type: 'insert', text: 'const value = 2;\n' },
+        { type: 'equal', text: '```' },
+      ]);
+      expect(hasPreviewText).toBe(false);
+
+      (MarkdownRenderer.renderMarkdown as jest.Mock).mockClear();
+      const previewEl = widgetRef.createDiffPreviewDOM(diffOps);
+      for (let i = 0; i < 5 && (MarkdownRenderer.renderMarkdown as jest.Mock).mock.calls.length < 2; i++) {
+        await Promise.resolve();
+      }
+
+      expect(MarkdownRenderer.renderMarkdown).toHaveBeenNthCalledWith(
+        1,
+        oldMarkdown,
+        expect.anything(),
+        'math/note.md',
+        plugin
+      );
+      expect(MarkdownRenderer.renderMarkdown).toHaveBeenNthCalledWith(
+        2,
+        newMarkdown,
+        expect.anything(),
+        'math/note.md',
+        plugin
+      );
+
+      const diffBlocks = previewEl.querySelectorAll('.claudian-diff-block');
+      expect(diffBlocks).toHaveLength(2);
+      expect(diffBlocks[0].hasClass('claudian-diff-del')).toBe(true);
+      expect(diffBlocks[1].hasClass('claudian-diff-ins')).toBe(true);
 
       widgetRef.reject();
       await expect(resultPromise).resolves.toEqual({ decision: 'reject' });

@@ -23,7 +23,6 @@ import {
   TOOL_WRITE,
   TOOL_WRITE_STDIN,
 } from '../../../core/tools/toolNames';
-import { extractToolResultContent } from '../../../core/tools/toolResultContent';
 import type { AskUserQuestionItem, AskUserQuestionOption, ToolCallInfo } from '../../../core/types';
 import type { DiffStats } from '../../../core/types/diff';
 import { appendMcpIcon } from '../../../shared/icons';
@@ -735,7 +734,7 @@ function getCurrentTask(input: Record<string, unknown>): TodoItem | undefined {
 
 function areAllTodosCompleted(input: Record<string, unknown>): boolean {
   const todos = getTodos(input);
-  if (!todos || todos.length === 0) return false;
+  if (!todos) return false;
   return todos.every(t => t.status === 'completed');
 }
 
@@ -807,16 +806,6 @@ export function renderTodoWriteResult(
   renderTodoItems(container, todos);
 }
 
-export function isBlockedToolResult(content: unknown, isError?: boolean): boolean {
-  const lower = extractToolResultContent(content, { fallbackIndent: 2 }).toLowerCase();
-  if (lower.includes('outside the vault')) return true;
-  if (lower.includes('access denied')) return true;
-  if (lower.includes('user denied')) return true;
-  if (lower.includes('approval')) return true;
-  if (isError && lower.includes('deny')) return true;
-  return false;
-}
-
 interface ToolElementStructure {
   toolEl: HTMLElement;
   header: HTMLElement;
@@ -826,6 +815,10 @@ interface ToolElementStructure {
   statusEl: HTMLElement;
   content: HTMLElement;
   currentTaskEl: HTMLElement | null;
+}
+
+export interface ToolCallRenderOptions {
+  initiallyExpanded?: boolean;
 }
 
 function createToolElementStructure(
@@ -1048,7 +1041,8 @@ function renderToolContent(
 export function renderToolCall(
   parentEl: HTMLElement,
   toolCall: ToolCallInfo,
-  toolCallElements: Map<string, HTMLElement>
+  toolCallElements: Map<string, HTMLElement>,
+  options: ToolCallRenderOptions = {}
 ): HTMLElement {
   const { toolEl, header, statusEl, content, currentTaskEl } =
     createToolElementStructure(parentEl, toolCall);
@@ -1060,11 +1054,12 @@ export function renderToolCall(
 
   renderToolContent(content, toolCall, 'Running...');
 
-  const state = { isExpanded: false };
-  toolCall.isExpanded = false;
+  const initiallyExpanded = options.initiallyExpanded ?? false;
+  const state = { isExpanded: initiallyExpanded };
+  toolCall.isExpanded = initiallyExpanded;
   const todoStatusEl = toolCall.name === TOOL_TODO_WRITE ? statusEl : null;
   setupCollapsible(toolEl, header, content, state, {
-    initiallyExpanded: false,
+    initiallyExpanded,
     onToggle: createTodoToggleHandler(currentTaskEl, todoStatusEl, (expanded) => {
       toolCall.isExpanded = expanded;
     }),
@@ -1129,7 +1124,8 @@ export function updateToolCallResult(
 /** For stored (non-streaming) tool calls — collapsed by default. */
 export function renderStoredToolCall(
   parentEl: HTMLElement,
-  toolCall: ToolCallInfo
+  toolCall: ToolCallInfo,
+  options: ToolCallRenderOptions = {}
 ): HTMLElement {
   const { toolEl, header, statusEl, content, currentTaskEl } =
     createToolElementStructure(parentEl, toolCall);
@@ -1145,7 +1141,7 @@ export function renderStoredToolCall(
   const state = { isExpanded: false };
   const todoStatusEl = toolCall.name === TOOL_TODO_WRITE ? statusEl : null;
   setupCollapsible(toolEl, header, content, state, {
-    initiallyExpanded: false,
+    initiallyExpanded: options.initiallyExpanded ?? false,
     onToggle: createTodoToggleHandler(currentTaskEl, todoStatusEl),
     baseAriaLabel: getToolLabel(toolCall.name, toolCall.input)
   });

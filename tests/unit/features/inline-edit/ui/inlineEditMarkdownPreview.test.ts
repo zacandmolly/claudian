@@ -1,4 +1,4 @@
-import { createMockEl } from '@test/helpers/mockElement';
+import { createMockEl } from '@test/helpers/MockElement';
 import { MarkdownRenderer } from 'obsidian';
 
 import { renderInlineEditMarkdownPreview } from '@/features/inline-edit/ui/inlineEditMarkdownPreview';
@@ -23,6 +23,27 @@ describe('renderInlineEditMarkdownPreview', () => {
 
     expect(MarkdownRenderer.renderMarkdown).toHaveBeenCalledWith(
       '**Claim.** $Z(f)$ and $V(f)$ have the same parity.',
+      container,
+      'math/note.md',
+      component
+    );
+  });
+
+  it('normalizes LaTeX math delimiters before rendering', async () => {
+    const app = { vault: {}, metadataCache: {} } as any;
+    const component = {} as any;
+    const container = createMockEl();
+
+    await renderInlineEditMarkdownPreview({
+      app,
+      component,
+      container,
+      markdown: 'Inline \\(x<y\\).\n\\[y^2\\]',
+      sourcePath: 'math/note.md',
+    });
+
+    expect(MarkdownRenderer.renderMarkdown).toHaveBeenCalledWith(
+      'Inline $x<y$.\n$$y^2$$',
       container,
       'math/note.md',
       component

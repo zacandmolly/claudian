@@ -1,18 +1,25 @@
 import * as fs from 'fs';
-import { Setting } from 'obsidian';
+import { Notice, Setting } from 'obsidian';
 
 import { ProviderSettingsCoordinator } from '../../../core/providers/ProviderSettingsCoordinator';
 import type { ProviderSettingsTabRenderer } from '../../../core/providers/types';
-import { renderEnvironmentSettingsSection } from '../../../features/settings/ui/EnvironmentSettingsSection';
 import { t } from '../../../i18n/i18n';
+import { renderEnvironmentSettingsSection } from '../../../shared/settings/EnvironmentSettingsSection';
+import { renderHostnameCliPathSetting } from '../../../shared/settings/HostnameCliPathSetting';
+import { renderNativeMcpSettingsSection } from '../../../shared/settings/NativeMcpSettingsSection';
+import { renderProviderEnablementSetting } from '../../../shared/settings/ProviderEnablementSetting';
+import {
+  renderLastEnabledProviderWarning,
+  renderProviderModelEnablementWarning,
+} from '../../../shared/settings/ProviderModelEnablementWarning';
 import { getHostnameKey } from '../../../utils/env';
-import { expandHomePath } from '../../../utils/path';
+import { normalizeConfiguredCliPath, stripSurroundingQuotes } from '../../../utils/path';
 import { getCodexWorkspaceServices } from '../app/CodexWorkspaceServices';
-import { parseConfiguredCustomModelIds, resolveCodexModelSelection } from '../modelOptions';
+import { getCodexModelOptions } from '../modelOptions';
+import { getDefaultCodexModel } from '../models';
 import { isWindowsStyleCliReference } from '../runtime/CodexBinaryLocator';
 import { getCodexProviderSettings, updateCodexProviderSettings } from '../settings';
-import { DEFAULT_CODEX_PRIMARY_MODEL } from '../types/models';
-import { CodexSkillSettings } from './CodexSkillSettings';
+import { renderCodexModelPicker } from './CodexModelPicker';
 import { CodexSubagentSettings } from './CodexSubagentSettings';
 
 export const codexSettingsTabRenderer: ProviderSettingsTabRenderer = {
@@ -23,53 +30,83 @@ export const codexSettingsTabRenderer: ProviderSettingsTabRenderer = {
     const hostnameKey = getHostnameKey();
     const isWindowsHost = process.platform === 'win32';
     let installationMethod = codexSettings.installationMethod;
+    const environmentModelPlaceholder = getDefaultCodexModel(codexSettings.discoveredModels)?.model
+      ?? 'model-id';
 
-    const reconcileActiveCodexModelSelection = (): void => {
-      const activeProvider = settingsBag.settingsProvider;
-      if (activeProvider !== 'codex') {
-        return;
+    const refreshCodexModelCatalog = async (): Promise<void> => {
+      const result = await codexWorkspace.refreshModelCatalog?.();
+      if (result?.diagnostics) {
+        new Notice(`Codex model discovery failed: ${result.diagnostics}`);
       }
-
-      const currentModel = typeof settingsBag.model === 'string' ? settingsBag.model : '';
-      const nextModel = resolveCodexModelSelection(settingsBag, currentModel);
-      if (!nextModel || nextModel === currentModel) {
-        return;
-      }
-
-      settingsBag.model = nextModel;
     };
 
     // --- Setup ---
 
     new Setting(container).setName(t('settings.setup')).setHeading();
 
-    new Setting(container)
-      .setName('Enable Codex provider')
-      .setDesc('When enabled, Codex models appear in the model selector for new conversations. Existing Codex sessions are preserved.')
-      .addToggle((toggle) =>
-        toggle
-          .setValue(codexSettings.enabled)
-          .onChange(async (value) => {
-            updateCodexProviderSettings(settingsBag, { enabled: value });
-            await context.plugin.saveSettings();
-            context.refreshModelSelectors();
-          })
-      );
+    renderProviderEnablementSetting({
+      container,
+      description: t('settings.providerEnablement.desc', { provider: 'Codex' }),
+      getValue: () => getCodexProviderSettings(settingsBag).enabled,
+      name: t('settings.providerEnablement.name', { provider: 'Codex' }),
+      onChange: async (value) => {
+        if (!ProviderSettingsCoordinator.canApplyProviderEnablement(
+          settingsBag,
+          'codex',
+          value,
+        )) {
+          lastProviderWarning.showFor();
+          return;
+        }
+
+        let accepted = true;
+        await context.plugin.runProviderExecutionTransition(['codex'], async () => {
+          await context.plugin.mutateSettings((settings) => {
+            accepted = ProviderSettingsCoordinator.applyProviderEnablement(
+              settings,
+              'codex',
+              value,
+            );
+          });
+        });
+        if (accepted) {
+          lastProviderWarning.hide();
+        } else {
+          lastProviderWarning.showFor();
+        }
+        modelWarning.context.notifyProviderModelOptionsChanged('codex');
+      },
+    });
+
+    const lastProviderWarning = renderLastEnabledProviderWarning(container);
+
+    const modelWarning = renderProviderModelEnablementWarning(container, context, {
+      getHasEnabledModels: () => getCodexModelOptions(settingsBag).length > 0,
+      getIsEnabled: () => getCodexProviderSettings(settingsBag).enabled,
+      providerId: 'codex',
+      providerName: 'Codex',
+    });
 
     if (isWindowsHost) {
       new Setting(container)
-        .setName('Installation method')
-        .setDesc('How Claudian should launch Codex on Windows. Native Windows uses a Windows executable path. WSL launches the Linux CLI inside a selected distro.')
+        .setName(t('settings.codex.installationMethod.name'))
+        .setDesc(t('settings.codex.installationMethod.desc'))
         .addDropdown((dropdown) => {
           dropdown
-            .addOption('native-windows', 'Native Windows')
-            .addOption('wsl', 'WSL')
+            .addOption('native-windows', t('settings.codex.installationMethod.nativeWindows'))
+            .addOption('wsl', t('settings.codex.installationMethod.wsl'))
             .setValue(installationMethod)
             .onChange(async (value) => {
               installationMethod = value === 'wsl' ? 'wsl' : 'native-windows';
-              updateCodexProviderSettings(settingsBag, { installationMethod });
+              await context.plugin.applyProviderRuntimeSettings(
+                ['codex'],
+                (settings) => {
+                  updateCodexProviderSettings(settings, { installationMethod });
+                },
+                () => codexWorkspace.cliResolver.reset(),
+              );
               refreshInstallationMethodUI();
-              await context.plugin.saveSettings();
+              await refreshCodexModelCatalog();
             });
         });
     }
@@ -77,46 +114,38 @@ export const codexSettingsTabRenderer: ProviderSettingsTabRenderer = {
     const getCliPathCopy = (): { desc: string; placeholder: string } => {
       if (!isWindowsHost) {
         return {
-          desc: 'Custom path to the local Codex CLI. Leave empty for auto-detection from PATH.',
+          desc: t('settings.codex.cliPath.descUnix'),
           placeholder: '/usr/local/bin/codex',
         };
       }
 
       if (installationMethod === 'wsl') {
         return {
-          desc: 'Linux-side Codex command or absolute path to run inside WSL. Leave empty for PATH lookup inside the selected distro.',
+          desc: t('settings.codex.cliPath.descWsl'),
           placeholder: 'codex',
         };
       }
 
       return {
-        desc: 'Custom path to the local Codex CLI. Leave empty for auto-detection from PATH. Use the native Windows executable path, usually `codex.exe`.',
+        desc: t('settings.codex.cliPath.descWindows'),
         placeholder: 'C:\\Users\\you\\AppData\\Roaming\\npm\\codex.exe',
       };
     };
 
     const shouldValidateCliPathAsFile = (): boolean => !isWindowsHost || installationMethod !== 'wsl';
 
-    const cliPathSetting = new Setting(container)
-      .setName('Codex CLI path')
-      .setDesc(getCliPathCopy().desc);
-
-    const validationEl = container.createDiv({
-      cls: 'claudian-cli-path-validation claudian-setting-validation claudian-setting-validation-error claudian-hidden',
-    });
-
     const validatePath = (value: string): string | null => {
       const trimmed = value.trim();
       if (!trimmed) return null;
 
       if (!shouldValidateCliPathAsFile()) {
-        if (isWindowsStyleCliReference(trimmed)) {
-          return 'WSL mode expects a Linux command or Linux absolute path, not a Windows executable path.';
+        if (isWindowsStyleCliReference(stripSurroundingQuotes(trimmed))) {
+          return t('settings.codex.cliPath.validation.wslWindowsPath');
         }
         return null;
       }
 
-      const expandedPath = expandHomePath(trimmed);
+      const expandedPath = normalizeConfiguredCliPath(trimmed);
 
       if (!fs.existsSync(expandedPath)) {
         return t('settings.cliPath.validation.notExist');
@@ -128,36 +157,41 @@ export const codexSettingsTabRenderer: ProviderSettingsTabRenderer = {
       return null;
     };
 
-    const updateCliPathValidation = (value: string, inputEl?: HTMLInputElement): boolean => {
-      const error = validatePath(value);
-      if (error) {
-        validationEl.setText(error);
-        validationEl.toggleClass('claudian-hidden', false);
-        if (inputEl) {
-          inputEl.toggleClass('claudian-input-error', true);
-        }
-        return false;
-      }
-
-      validationEl.toggleClass('claudian-hidden', true);
-      if (inputEl) {
-        inputEl.toggleClass('claudian-input-error', false);
-      }
-      return true;
-    };
-
-    const cliPathsByHost = { ...codexSettings.cliPathsByHost };
-    let cliPathInputEl: HTMLInputElement | null = null;
     let wslDistroSettingEl: HTMLElement | null = null;
     let wslDistroInputEl: HTMLInputElement | null = null;
 
+    const cliPathControl = renderHostnameCliPathSetting({
+      container,
+      description: getCliPathCopy().desc,
+      getValue: () => getCodexProviderSettings(settingsBag).cliPathsByHost[hostnameKey] || '',
+      name: t('settings.codex.cliPath.name'),
+      onChange: async (value) => {
+        const cliPathsByHost = {
+          ...getCodexProviderSettings(settingsBag).cliPathsByHost,
+        };
+        if (value) {
+          cliPathsByHost[hostnameKey] = value;
+        } else {
+          delete cliPathsByHost[hostnameKey];
+        }
+
+        await context.plugin.applyProviderRuntimeSettings(
+          ['codex'],
+          (settings) => {
+            updateCodexProviderSettings(settings, { cliPathsByHost });
+          },
+          () => codexWorkspace.cliResolver.reset(),
+        );
+      },
+      placeholder: getCliPathCopy().placeholder,
+      validate: validatePath,
+    });
+
     const refreshInstallationMethodUI = (): void => {
       const cliCopy = getCliPathCopy();
-      cliPathSetting.setDesc(cliCopy.desc);
-      if (cliPathInputEl) {
-        cliPathInputEl.placeholder = cliCopy.placeholder;
-        updateCliPathValidation(cliPathInputEl.value, cliPathInputEl);
-      }
+      cliPathControl.setDescription(cliCopy.desc);
+      cliPathControl.setPlaceholder(cliCopy.placeholder);
+      cliPathControl.revalidate();
       if (wslDistroSettingEl) {
         wslDistroSettingEl.toggleClass('claudian-hidden', installationMethod !== 'wsl');
       }
@@ -166,47 +200,10 @@ export const codexSettingsTabRenderer: ProviderSettingsTabRenderer = {
       }
     };
 
-    const persistCliPath = async (value: string): Promise<boolean> => {
-      const isValid = updateCliPathValidation(value, cliPathInputEl ?? undefined);
-      if (!isValid) {
-        return false;
-      }
-
-      const trimmed = value.trim();
-      if (trimmed) {
-        cliPathsByHost[hostnameKey] = trimmed;
-      } else {
-        delete cliPathsByHost[hostnameKey];
-      }
-
-      updateCodexProviderSettings(settingsBag, { cliPathsByHost: { ...cliPathsByHost } });
-      await context.plugin.saveSettings();
-      const view = context.plugin.getView();
-      await view?.getTabManager()?.broadcastToAllTabs(
-        (service) => Promise.resolve(service.cleanup())
-      );
-      return true;
-    };
-
-    const currentValue = codexSettings.cliPathsByHost[hostnameKey] || '';
-
-    cliPathSetting.addText((text) => {
-      text
-        .setPlaceholder(getCliPathCopy().placeholder)
-        .setValue(currentValue)
-        .onChange(async (value) => {
-          await persistCliPath(value);
-        });
-      text.inputEl.addClass('claudian-settings-cli-path-input');
-      cliPathInputEl = text.inputEl;
-
-      updateCliPathValidation(currentValue, text.inputEl);
-    });
-
     if (isWindowsHost) {
       const wslDistroSetting = new Setting(container)
-        .setName('WSL distro override')
-        .setDesc('Optional advanced override. Leave empty to infer the distro from a WSL workspace path when possible, otherwise use the default WSL distro.');
+        .setName(t('settings.codex.wslDistroOverride.name'))
+        .setDesc(t('settings.codex.wslDistroOverride.desc'));
 
       wslDistroSettingEl = wslDistroSetting.settingEl;
       wslDistroSetting.addText((text) => {
@@ -214,8 +211,13 @@ export const codexSettingsTabRenderer: ProviderSettingsTabRenderer = {
           .setPlaceholder('Ubuntu')
           .setValue(codexSettings.wslDistroOverride)
           .onChange(async (value) => {
-            updateCodexProviderSettings(settingsBag, { wslDistroOverride: value });
-            await context.plugin.saveSettings();
+            await context.plugin.applyProviderRuntimeSettings(
+              ['codex'],
+              (settings) => {
+                updateCodexProviderSettings(settings, { wslDistroOverride: value });
+              },
+              () => codexWorkspace.cliResolver.reset(),
+            );
           });
 
         text.inputEl.addClass('claudian-settings-cli-path-input');
@@ -226,6 +228,51 @@ export const codexSettingsTabRenderer: ProviderSettingsTabRenderer = {
 
     refreshInstallationMethodUI();
 
+    // --- Models ---
+
+    new Setting(container).setName(t('settings.models')).setHeading();
+
+    const modelPicker = renderCodexModelPicker(container, modelWarning.context, codexWorkspace);
+
+    new Setting(container)
+      .setName(t('settings.codex.ultraEffort.name'))
+      .setDesc(t('settings.codex.ultraEffort.desc'))
+      .addToggle(toggle => toggle
+        .setValue(codexSettings.enableUltraEffort)
+        .onChange(async (value) => {
+          await context.plugin.mutateSettings((settings) => {
+            updateCodexProviderSettings(settings, { enableUltraEffort: value });
+            ProviderSettingsCoordinator.normalizeAllModelVariants(settings);
+          });
+          modelPicker.refresh();
+          context.notifyProviderModelOptionsChanged('codex');
+        }));
+
+    const SUMMARY_OPTIONS: { value: string; label: string }[] = [
+      { value: 'auto', label: t('settings.codex.reasoningSummary.auto') },
+      { value: 'concise', label: t('settings.codex.reasoningSummary.concise') },
+      { value: 'detailed', label: t('settings.codex.reasoningSummary.detailed') },
+      { value: 'none', label: t('settings.codex.reasoningSummary.off') },
+    ];
+
+    new Setting(container)
+      .setName(t('settings.codex.reasoningSummary.name'))
+      .setDesc(t('settings.codex.reasoningSummary.desc'))
+      .addDropdown((dropdown) => {
+        for (const opt of SUMMARY_OPTIONS) {
+          dropdown.addOption(opt.value, opt.label);
+        }
+        dropdown.setValue(codexSettings.reasoningSummary);
+        dropdown.onChange(async (value) => {
+          await context.plugin.mutateSettings((settings) => {
+            updateCodexProviderSettings(
+              settings,
+              { reasoningSummary: value as 'auto' | 'concise' | 'detailed' | 'none' },
+            );
+          });
+        });
+      });
+
     // --- Safety ---
 
     new Setting(container).setName(t('settings.safety')).setHeading();
@@ -235,166 +282,38 @@ export const codexSettingsTabRenderer: ProviderSettingsTabRenderer = {
       .setDesc(t('settings.codexSafeMode.desc'))
       .addDropdown((dropdown) => {
         dropdown
-          .addOption('workspace-write', 'Workspace write')
-          .addOption('read-only', 'Read only')
+          .addOption('workspace-write', t('settings.codex.safeMode.workspaceWrite'))
+          .addOption('read-only', t('settings.codex.safeMode.readOnly'))
           .setValue(codexSettings.safeMode)
           .onChange(async (value) => {
-            updateCodexProviderSettings(
-              settingsBag,
-              { safeMode: value as 'workspace-write' | 'read-only' },
-            );
-            await context.plugin.saveSettings();
+            await context.plugin.mutateSettings((settings) => {
+              updateCodexProviderSettings(
+                settings,
+                { safeMode: value as 'workspace-write' | 'read-only' },
+              );
+            });
           });
-      });
-
-    // --- Models ---
-
-    new Setting(container).setName(t('settings.models')).setHeading();
-
-    const SUMMARY_OPTIONS: { value: string; label: string }[] = [
-      { value: 'auto', label: 'Auto' },
-      { value: 'concise', label: 'Concise' },
-      { value: 'detailed', label: 'Detailed' },
-      { value: 'none', label: 'Off' },
-    ];
-
-    new Setting(container)
-      .setName('Custom models')
-      .setDesc('Append additional Codex model ids to the picker, one per line. `OPENAI_MODEL` still takes precedence when set.')
-      .addTextArea((text) => {
-        let pendingCustomModels = codexSettings.customModels;
-        let savedCustomModels = codexSettings.customModels;
-
-        const reconcileInactiveCodexProjection = (
-          previousCustomModels: string,
-        ): boolean => {
-          if (settingsBag.settingsProvider === 'codex') {
-            return false;
-          }
-
-          const savedProviderModel = (
-            settingsBag.savedProviderModel
-            && typeof settingsBag.savedProviderModel === 'object'
-          )
-            ? settingsBag.savedProviderModel as Record<string, unknown>
-            : {};
-          const currentSavedModel = typeof savedProviderModel.codex === 'string'
-            ? savedProviderModel.codex
-            : '';
-          if (!currentSavedModel) {
-            return false;
-          }
-
-          const previousCustomModelIds = new Set(parseConfiguredCustomModelIds(previousCustomModels));
-          if (!previousCustomModelIds.has(currentSavedModel)) {
-            return false;
-          }
-
-          const nextSavedModel = resolveCodexModelSelection(settingsBag, currentSavedModel);
-          if (!nextSavedModel || nextSavedModel === currentSavedModel) {
-            return false;
-          }
-
-          settingsBag.savedProviderModel = {
-            ...savedProviderModel,
-            codex: nextSavedModel,
-          };
-          return true;
-        };
-
-        const commitCustomModels = async (): Promise<void> => {
-          const previousCustomModels = savedCustomModels;
-          const previousModel = typeof settingsBag.model === 'string' ? settingsBag.model : '';
-          const previousTitleModel = typeof settingsBag.titleGenerationModel === 'string'
-            ? settingsBag.titleGenerationModel
-            : '';
-
-          if (pendingCustomModels !== savedCustomModels) {
-            updateCodexProviderSettings(settingsBag, { customModels: pendingCustomModels });
-            savedCustomModels = pendingCustomModels;
-          }
-
-          reconcileActiveCodexModelSelection();
-          const didReconcileInactiveProjection = reconcileInactiveCodexProjection(previousCustomModels);
-          const didReconcileTitleModel = ProviderSettingsCoordinator
-            .reconcileTitleGenerationModelSelection(settingsBag);
-          const nextModel = typeof settingsBag.model === 'string' ? settingsBag.model : '';
-          const nextTitleModel = typeof settingsBag.titleGenerationModel === 'string'
-            ? settingsBag.titleGenerationModel
-            : '';
-          const didModelSelectionChange = previousModel !== nextModel;
-          const didCustomModelsChange = previousCustomModels !== savedCustomModels;
-
-          if (!didCustomModelsChange && !didModelSelectionChange && !didReconcileInactiveProjection
-            && !didReconcileTitleModel
-            && previousTitleModel === nextTitleModel) {
-            return;
-          }
-
-          await context.plugin.saveSettings();
-          context.refreshModelSelectors();
-        };
-
-        text
-          .setPlaceholder('gpt-5.4\ngpt-5.3-codex-spark')
-          .setValue(codexSettings.customModels)
-          .onChange((value) => {
-            pendingCustomModels = value;
-          });
-        text.inputEl.rows = 4;
-        text.inputEl.cols = 40;
-        text.inputEl.addEventListener('blur', () => {
-          void commitCustomModels();
-        });
-      });
-
-    new Setting(container)
-      .setName('Reasoning summary')
-      .setDesc('Show a summary of the model\'s reasoning process in the thinking block.')
-      .addDropdown((dropdown) => {
-        for (const opt of SUMMARY_OPTIONS) {
-          dropdown.addOption(opt.value, opt.label);
-        }
-        dropdown.setValue(codexSettings.reasoningSummary);
-        dropdown.onChange(async (value) => {
-          updateCodexProviderSettings(
-            settingsBag,
-            { reasoningSummary: value as 'auto' | 'concise' | 'detailed' | 'none' },
-          );
-          await context.plugin.saveSettings();
-        });
       });
 
     // --- Skills ---
 
-    const codexCatalog = codexWorkspace.commandCatalog;
-    if (codexCatalog) {
-      new Setting(container).setName('Codex skills').setHeading();
-
-      const skillsDesc = container.createDiv({ cls: 'claudian-sp-settings-desc' });
-      skillsDesc.createEl('p', {
-        cls: 'setting-item-description',
-        text: 'Manage vault-level Codex skills stored in .codex/skills/ or .agents/skills/. Home-level skills are excluded here.',
-      });
-
-      const skillsContainer = container.createDiv({ cls: 'claudian-slash-commands-container' });
-      new CodexSkillSettings(skillsContainer, codexCatalog, context.plugin.app);
-    }
+    new Setting(container).setName(t('settings.agentSkills.sectionTitle')).setHeading();
+    context.renderAgentSkillSettings(container, 'codex');
 
     context.renderHiddenProviderCommandSetting(container, 'codex', {
-      name: 'Hidden Skills',
-      desc: 'Hide specific Codex skills from the dropdown. Enter skill names without the leading $, one per line.',
-      placeholder: 'analyze\nexplain\nfix',
+      name: t('settings.codex.skills.hiddenName'),
+      desc: t('settings.codex.skills.hiddenDesc'),
+      placeholder: t('settings.codex.skills.hiddenPlaceholder'),
     });
 
     // --- Subagents ---
 
-    new Setting(container).setName('Codex subagents').setHeading();
+    new Setting(container).setName(t('settings.codex.subagents.name')).setHeading();
 
     const subagentDesc = container.createDiv({ cls: 'claudian-sp-settings-desc' });
     subagentDesc.createEl('p', {
       cls: 'setting-item-description',
-      text: 'Manage vault-level Codex subagents stored in .codex/agents/. Each TOML file defines one custom agent.',
+      text: t('settings.codex.subagents.desc'),
     });
 
     const subagentContainer = container.createDiv({ cls: 'claudian-slash-commands-container' });
@@ -404,15 +323,13 @@ export const codexSettingsTabRenderer: ProviderSettingsTabRenderer = {
 
     // --- MCP Servers ---
 
-    new Setting(container).setName(t('settings.mcpServers.name')).setHeading();
-    const mcpNotice = container.createDiv({ cls: 'claudian-mcp-settings-desc' });
-    const mcpDesc = mcpNotice.createEl('p', { cls: 'setting-item-description' });
-    mcpDesc.appendText('Codex manages MCP servers via its own CLI. Configure with ');
-    mcpDesc.createEl('code').appendText('codex mcp');
-    mcpDesc.appendText(' and they will be available in Claudian. ');
-    mcpDesc.createEl('a', {
-      text: 'Learn more',
-      href: 'https://developers.openai.com/codex/mcp',
+    renderNativeMcpSettingsSection(container, {
+      descriptionAfterCommand: t('settings.codex.mcp.descAfterCommand'),
+      descriptionBeforeCommand: t('settings.codex.mcp.descBeforeCommand'),
+      documentationLabel: t('settings.codex.mcp.learnMore'),
+      documentationUrl: 'https://developers.openai.com/codex/mcp',
+      heading: t('settings.mcpServers.name'),
+      setupCommand: 'codex mcp',
     });
 
     // --- Environment ---
@@ -422,9 +339,9 @@ export const codexSettingsTabRenderer: ProviderSettingsTabRenderer = {
       plugin: context.plugin,
       scope: 'provider:codex',
       heading: t('settings.environment'),
-      name: 'Codex environment',
-      desc: 'Codex-owned runtime variables only. Use this for OPENAI_* and CODEX_* settings. If Codex auto-detection needs help, add its install directory to shared PATH instead of this provider section.',
-      placeholder: `OPENAI_API_KEY=your-key\nOPENAI_BASE_URL=https://api.openai.com/v1\nOPENAI_MODEL=${DEFAULT_CODEX_PRIMARY_MODEL}\nCODEX_SANDBOX=workspace-write`,
+      name: t('settings.codex.environment.name'),
+      desc: t('settings.codex.environment.desc'),
+      placeholder: `OPENAI_API_KEY=your-key\nOPENAI_BASE_URL=https://api.openai.com/v1\nOPENAI_MODEL=${environmentModelPlaceholder}\nCODEX_SANDBOX=workspace-write`,
       renderCustomContextLimits: (target) => context.renderCustomContextLimits(target, 'codex'),
     });
   },

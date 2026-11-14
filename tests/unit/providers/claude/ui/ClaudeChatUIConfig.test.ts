@@ -1,6 +1,64 @@
+import { DEFAULT_CLAUDE_PROVIDER_SETTINGS } from '@/providers/claude/settings';
 import { claudeChatUIConfig } from '@/providers/claude/ui/ClaudeChatUIConfig';
 
 describe('claudeChatUIConfig', () => {
+  describe('getDefaultModel', () => {
+    it('prefers Opus for fresh Claude settings', () => {
+      expect(DEFAULT_CLAUDE_PROVIDER_SETTINGS.defaultModel).toBe('opus');
+      expect(claudeChatUIConfig.getDefaultModel?.({})).toBe('opus');
+    });
+
+    it('follows the Opus environment slot when it overrides the model id', () => {
+      expect(claudeChatUIConfig.getDefaultModel?.({
+        providerConfigs: {
+          claude: {
+            defaultModel: 'opus',
+            environmentVariables: 'ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-enterprise',
+          },
+        },
+      })).toBe('claude-code/claude-opus-enterprise');
+    });
+
+    it('supports a custom model selected as the Claude provider default', () => {
+      expect(claudeChatUIConfig.getDefaultModel?.({
+        providerConfigs: {
+          claude: {
+            customModels: 'claude-opus-4-6',
+            defaultModel: 'claude-code/claude-opus-4-6',
+          },
+        },
+      })).toBe('claude-code/claude-opus-4-6');
+    });
+
+    it('falls back to the first dynamic option when the preference is unavailable', () => {
+      expect(claudeChatUIConfig.getDefaultModel?.({
+        providerConfigs: {
+          claude: {
+            defaultModel: 'retired-model',
+            environmentVariables: 'ANTHROPIC_MODEL=claude-sonnet-gateway',
+          },
+        },
+      })).toBe('claude-code/claude-sonnet-gateway');
+    });
+
+    it('keeps configured fallback order independent from visual menu grouping', () => {
+      expect(claudeChatUIConfig.getDefaultModel?.({
+        providerConfigs: {
+          claude: {
+            showDefaultModels: false,
+            defaultModel: 'retired-model',
+            customModels: 'claude-opus-4.8\nopenai/gpt-5.6-terra',
+          },
+        },
+      })).toBe('claude-code/claude-opus-4.8');
+    });
+  });
+
+  it('defaults Claude models to high effort', () => {
+    expect(claudeChatUIConfig.getDefaultReasoningValue('haiku', {})).toBe('high');
+    expect(claudeChatUIConfig.getDefaultReasoningValue('custom-model', {})).toBe('high');
+  });
+
   describe('getModelOptions', () => {
     it('appends settings-defined custom models after the built-in options', () => {
       const options = claudeChatUIConfig.getModelOptions({
@@ -15,20 +73,39 @@ describe('claudeChatUIConfig', () => {
         'haiku',
         'sonnet',
         'opus',
-        'claude-opus-4-6',
-        'claude-opus-4-6[1m]',
+        'fable',
+        'claude-code/claude-opus-4-6',
+        'claude-code/claude-opus-4-6[1m]',
       ]);
       expect(options.slice(-2)).toEqual([
         {
-          value: 'claude-opus-4-6',
+          value: 'claude-code/claude-opus-4-6',
           label: 'Opus 4.6',
           description: 'Custom model',
+          group: 'Claude',
         },
         {
-          value: 'claude-opus-4-6[1m]',
+          value: 'claude-code/claude-opus-4-6[1m]',
           label: 'Opus 4.6 (1M)',
           description: 'Custom model',
+          group: 'Claude',
         },
+      ]);
+    });
+
+    it('keeps configured custom models while built-in defaults are disabled', () => {
+      const options = claudeChatUIConfig.getModelOptions({
+        providerConfigs: {
+          claude: {
+            showDefaultModels: false,
+            customModels: 'deepseek-v4-flash-vision-exp\nclaude-opus-4-8',
+          },
+        },
+      });
+
+      expect(options.map(option => option.value)).toEqual([
+        'claude-code/deepseek-v4-flash-vision-exp',
+        'claude-code/claude-opus-4-8',
       ]);
     });
 
@@ -36,7 +113,7 @@ describe('claudeChatUIConfig', () => {
       const options = claudeChatUIConfig.getModelOptions({
         providerConfigs: {
           claude: {
-            customModels: 'haiku\nclaude-opus-4-6\nclaude-opus-4-6\n',
+            customModels: 'haiku\nclaude-fable-5\nclaude-opus-4-6\nclaude-opus-4-6\n',
           },
         },
       });
@@ -45,7 +122,8 @@ describe('claudeChatUIConfig', () => {
         'haiku',
         'sonnet',
         'opus',
-        'claude-opus-4-6',
+        'fable',
+        'claude-code/claude-opus-4-6',
       ]);
     });
 
@@ -59,9 +137,27 @@ describe('claudeChatUIConfig', () => {
       });
 
       expect(options.at(-1)).toEqual({
-        value: 'claude-opus-4-5-20251101',
+        value: 'claude-code/claude-opus-4-5-20251101',
         label: 'Opus 4.5 (2511)',
         description: 'Custom model',
+        group: 'Claude',
+      });
+    });
+
+    it('formats a future fable custom model id without the built-in default', () => {
+      const options = claudeChatUIConfig.getModelOptions({
+        providerConfigs: {
+          claude: {
+            customModels: 'claude-fable-6',
+          },
+        },
+      });
+
+      expect(options.at(-1)).toEqual({
+        value: 'claude-code/claude-fable-6',
+        label: 'Fable 6',
+        description: 'Custom model',
+        group: 'Claude',
       });
     });
 
@@ -78,9 +174,10 @@ describe('claudeChatUIConfig', () => {
       });
 
       expect(options.at(-1)).toEqual({
-        value: 'claude-opus-4-6',
+        value: 'claude-code/claude-opus-4-6',
         label: 'Work Opus',
         description: 'Custom model',
+        group: 'Claude',
       });
     });
 
@@ -96,9 +193,11 @@ describe('claudeChatUIConfig', () => {
 
       expect(options).toEqual([
         {
-          value: 'claude-sonnet-4-5',
+          value: 'claude-code/claude-sonnet-4-5',
           label: 'Sonnet 4.5',
           description: 'Custom model (model)',
+          environmentTypes: ['model'],
+          group: 'Claude',
         },
       ]);
     });
@@ -117,9 +216,11 @@ describe('claudeChatUIConfig', () => {
 
       expect(options).toEqual([
         {
-          value: 'claude-sonnet-4-5',
+          value: 'claude-code/claude-sonnet-4-5',
           label: 'Gateway Sonnet',
           description: 'Custom model (model)',
+          environmentTypes: ['model'],
+          group: 'Claude',
         },
       ]);
     });
@@ -136,17 +237,86 @@ describe('claudeChatUIConfig', () => {
       const options = claudeChatUIConfig.getReasoningOptions('claude-opus-4-7', {});
 
       expect(options.map(option => option.value)).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+      expect(options.find(option => option.value === 'medium')?.label).toBe('Medium');
+      expect(options.find(option => option.value === 'xhigh')?.label).toBe('xHigh');
+    });
+
+    it('keeps xhigh on fable models', () => {
+      const options = claudeChatUIConfig.getReasoningOptions('fable', {});
+
+      expect(options.map(option => option.value)).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
     });
 
     it('uses effort options for custom model ids', () => {
       const options = claudeChatUIConfig.getReasoningOptions('custom-model', {});
 
-      expect(options.map(option => option.value)).toEqual(['low', 'medium', 'high', 'max']);
+      expect(options.map(option => option.value)).toEqual([
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+      ]);
       expect(options.some(option => option.tokens !== undefined)).toBe(false);
+    });
+
+    it('exposes only high and max effort for DeepSeek routes', () => {
+      const options = claudeChatUIConfig.getReasoningOptions('deepseek-v4-flash', {});
+
+      expect(options.map(option => option.value)).toEqual(['high', 'max']);
+      expect(claudeChatUIConfig.isAdaptiveReasoningModel('deepseek-v4-flash', {})).toBe(true);
+      expect(claudeChatUIConfig.isAdaptiveReasoningModel('openrouter/fusion', {})).toBe(false);
     });
   });
 
   describe('applyModelDefaults', () => {
+    it('persists the tier identity of an environment-mapped model', () => {
+      const settings: Record<string, unknown> = {
+        effortLevel: 'high',
+        providerConfigs: {
+          claude: {
+            lastModel: 'haiku',
+            environmentVariables: [
+              'ANTHROPIC_DEFAULT_HAIKU_MODEL=custom-haiku',
+              'ANTHROPIC_DEFAULT_FABLE_MODEL=gpt-4.1',
+            ].join('\n'),
+          },
+        },
+      };
+
+      claudeChatUIConfig.applyModelDefaults('claude-code/gpt-4.1', settings);
+
+      expect((settings.providerConfigs as Record<string, Record<string, unknown>>).claude.lastModel)
+        .toBe('fable');
+      expect((settings.providerConfigs as Record<string, Record<string, unknown>>).claude.modelEnvironmentType)
+        .toBe('fable');
+      expect(settings.lastCustomModel).toBeUndefined();
+    });
+
+    it('preserves the environment tier of a concrete legacy Fable ID', () => {
+      const settings: Record<string, unknown> = {
+        effortLevel: 'high',
+        providerConfigs: {
+          claude: {
+            lastModel: 'fable',
+            modelEnvironmentType: 'fable',
+            environmentVariables: [
+              'ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-fable-5',
+              'ANTHROPIC_DEFAULT_FABLE_MODEL=gpt-4.1',
+            ].join('\n'),
+          },
+        },
+      };
+
+      claudeChatUIConfig.applyModelDefaults('claude-code/claude-fable-5', settings);
+
+      expect((settings.providerConfigs as Record<string, Record<string, unknown>>).claude)
+        .toMatchObject({
+          lastModel: 'haiku',
+          modelEnvironmentType: 'haiku',
+        });
+    });
+
     it('clamps stale xhigh effort when switching to a custom sonnet model', () => {
       const settings: Record<string, unknown> = {
         effortLevel: 'xhigh',
@@ -168,6 +338,33 @@ describe('claudeChatUIConfig', () => {
       claudeChatUIConfig.applyModelDefaults('claude-opus-4-7', settings);
 
       expect(settings.effortLevel).toBe('xhigh');
+    });
+  });
+
+  describe('applyModelProjectionDefaults', () => {
+    it('preserves a user-selected effort for default tier models', () => {
+      const settings: Record<string, unknown> = { effortLevel: 'low' };
+
+      claudeChatUIConfig.applyModelProjectionDefaults?.('opus', settings);
+
+      expect(settings.effortLevel).toBe('low');
+    });
+
+    it('preserves xhigh on the opus alias that supports it', () => {
+      const settings: Record<string, unknown> = { effortLevel: 'xhigh' };
+
+      claudeChatUIConfig.applyModelProjectionDefaults?.('opus', settings);
+
+      expect(settings.effortLevel).toBe('xhigh');
+    });
+
+    it('clamps an effort the projected model cannot use', () => {
+      const settings: Record<string, unknown> = { effortLevel: 'xhigh' };
+
+      // The haiku alias does not support xhigh -> fall back to the default.
+      claudeChatUIConfig.applyModelProjectionDefaults?.('haiku', settings);
+
+      expect(settings.effortLevel).toBe('high');
     });
   });
 });

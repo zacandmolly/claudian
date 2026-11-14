@@ -1,7 +1,10 @@
 import { Readable, Writable } from 'stream';
 
 import type { CodexAppServerProcess } from '@/providers/codex/runtime/CodexAppServerProcess';
-import { CodexRpcTransport } from '@/providers/codex/runtime/CodexRpcTransport';
+import {
+  CodexRpcResponseError,
+  CodexRpcTransport,
+} from '@/providers/codex/runtime/CodexRpcTransport';
 
 function createMockServerProcess(): CodexAppServerProcess & {
   _stdout: Readable;
@@ -24,6 +27,8 @@ function createMockServerProcess(): CodexAppServerProcess & {
     stderr: new Readable({ read() {} }),
     isAlive: jest.fn().mockReturnValue(true),
     onExit: jest.fn(),
+    offExit: jest.fn(),
+    getStderrSnapshot: jest.fn().mockReturnValue(''),
     _stdout: stdout,
     _stdin: stdin,
     _written: written,
@@ -76,9 +81,23 @@ describe('CodexRpcTransport', () => {
       const promise = transport.request('thread/start', {});
 
       const sent = JSON.parse(proc._written[0]);
-      proc._pushLine({ jsonrpc: '2.0', id: sent.id, error: { code: -32600, message: 'Invalid request' } });
+      proc._pushLine({
+        jsonrpc: '2.0',
+        id: sent.id,
+        error: {
+          code: -32600,
+          message: 'Invalid request',
+          data: { reason: 'not-active' },
+        },
+      });
 
-      await expect(promise).rejects.toThrow('Invalid request');
+      await expect(promise).rejects.toEqual(expect.objectContaining({
+        name: 'CodexRpcResponseError',
+        code: -32600,
+        data: { reason: 'not-active' },
+        message: 'Invalid request',
+      }));
+      await expect(promise).rejects.toBeInstanceOf(CodexRpcResponseError);
     });
 
     it('correlates multiple concurrent requests correctly', async () => {
@@ -131,6 +150,20 @@ describe('CodexRpcTransport', () => {
       // No crash — transport stays functional
       expect(transport).toBeDefined();
     });
+
+    it('contains synchronous notification handler exceptions', async () => {
+      const throwingHandler = jest.fn(() => { throw new Error('handler failed'); });
+      const workingHandler = jest.fn();
+      transport.onNotification('throwing', throwingHandler);
+      transport.onNotification('working', workingHandler);
+
+      proc._pushLine({ jsonrpc: '2.0', method: 'throwing', params: {} });
+      proc._pushLine({ jsonrpc: '2.0', method: 'working', params: { ok: true } });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      expect(throwingHandler).toHaveBeenCalledTimes(1);
+      expect(workingHandler).toHaveBeenCalledWith({ ok: true });
+    });
   });
 
   describe('server-initiated requests', () => {
@@ -179,6 +212,18 @@ describe('CodexRpcTransport', () => {
       expect(response.error).toBeDefined();
       expect(response.error.code).toBe(-32601);
     });
+
+    it('turns a synchronous server request handler exception into an error response', async () => {
+      transport.onServerRequest('throwing/request', (() => {
+        throw new Error('synchronous failure');
+      }) as any);
+
+      proc._pushLine({ jsonrpc: '2.0', id: 201, method: 'throwing/request', params: {} });
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      const response = proc._written.map(line => JSON.parse(line)).find(message => message.id === 201);
+      expect(response.error).toMatchObject({ code: -32603, message: 'synchronous failure' });
+    });
   });
 
   describe('malformed input', () => {
@@ -189,6 +234,33 @@ describe('CodexRpcTransport', () => {
       // Should not throw
       expect(transport).toBeDefined();
     });
+
+    it.each([null, true, 42, 'text'])('ignores parsed JSON primitive %p', async (primitive) => {
+      proc._pushLine(primitive);
+      const request = transport.request('still/works', {});
+      const sent = JSON.parse(proc._written[0]);
+      proc._pushLine({ jsonrpc: '2.0', id: sent.id, result: 'ok' });
+      await expect(request).resolves.toBe('ok');
+    });
+  });
+
+  it('rejects requests immediately after disposal even with no timeout', async () => {
+    transport.dispose();
+
+    await expect(transport.request('after/dispose', {}, 0)).rejects.toThrow('Transport disposed');
+    expect(proc._written).toEqual([]);
+  });
+
+  it('starts once and unregisters its process exit listener during repeated disposal', () => {
+    transport.start();
+    expect(proc.onExit).toHaveBeenCalledTimes(1);
+
+    const exitHandler = (proc.onExit as jest.Mock).mock.calls[0][0];
+    transport.dispose();
+    transport.dispose();
+
+    expect(proc.offExit).toHaveBeenCalledTimes(1);
+    expect(proc.offExit).toHaveBeenCalledWith(exitHandler);
   });
 
   describe('cleanup on process exit', () => {
@@ -201,6 +273,39 @@ describe('CodexRpcTransport', () => {
       exitCb(1, 'SIGTERM');
 
       await expect(promise).rejects.toThrow();
+    });
+
+    it('includes stderr when rejecting pending requests after process exit', async () => {
+      (proc.getStderrSnapshot as jest.Mock).mockReturnValue(
+        'failed to load configuration: ~/.codex/config.toml: unknown variant priority',
+      );
+      const exitCb = (proc.onExit as jest.Mock).mock.calls[0][0];
+
+      const promise = transport.request('initialize', {});
+
+      exitCb(1, null);
+
+      await expect(promise).rejects.toThrow('unknown variant priority');
+    });
+
+    it('preserves late stderr when stdout ends before process close', async () => {
+      const exitCb = (proc.onExit as jest.Mock).mock.calls[0][0];
+      const promise = transport.request('initialize', {});
+      const outcome = promise.then(
+        () => null,
+        (error: Error) => error,
+      );
+
+      proc._stdout.push(null);
+      await new Promise(resolve => setImmediate(resolve));
+      (proc.getStderrSnapshot as jest.Mock).mockReturnValue(
+        'failed to load configuration: unknown variant priority',
+      );
+      exitCb(1, null);
+
+      await expect(outcome).resolves.toEqual(expect.objectContaining({
+        message: expect.stringContaining('unknown variant priority'),
+      }));
     });
   });
 

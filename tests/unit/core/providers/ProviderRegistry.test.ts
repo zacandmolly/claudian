@@ -1,5 +1,11 @@
 import '@/providers';
 
+import {
+  TEST_CODEX_CATALOG,
+  TEST_CODEX_MODEL,
+  TEST_CODEX_MODEL_LABEL,
+} from '@test/helpers/codexModels';
+
 import { ProviderRegistry } from '@/core/providers/ProviderRegistry';
 import { ProviderWorkspaceRegistry } from '@/core/providers/ProviderWorkspaceRegistry';
 import type {
@@ -8,27 +14,18 @@ import type {
   TitleGenerationResult,
   TitleGenerationService,
 } from '@/core/providers/types';
-import { DEFAULT_CODEX_PRIMARY_MODEL } from '@/providers/codex/types/models';
 
 describe('ProviderRegistry', () => {
   beforeEach(() => {
     ProviderWorkspaceRegistry.clear();
     ProviderWorkspaceRegistry.setServices('claude', {
-      mcpManager: {} as any,
-      mcpServerManager: {} as any,
     } as any);
+    jest.spyOn(ProviderWorkspaceRegistry, 'ensureInitialized')
+      .mockResolvedValue(undefined);
   });
 
   afterEach(() => {
     jest.restoreAllMocks();
-  });
-
-  it('creates a runtime with the default provider id', () => {
-    const runtime = ProviderRegistry.createChatRuntime({
-      plugin: {} as any,
-    });
-
-    expect(runtime.providerId).toBe('claude');
   });
 
   it('returns capabilities for the default provider', () => {
@@ -44,6 +41,19 @@ describe('ProviderRegistry', () => {
 
     const taskInterpreter = ProviderRegistry.getTaskResultInterpreter();
     expect(taskInterpreter).toHaveProperty('resolveTerminalStatus');
+  });
+
+  it('creates transcript-backed subagent history only for providers that own it', () => {
+    const host = {} as any;
+
+    expect(ProviderRegistry.createSubagentHistoryService(host, 'claude')).toMatchObject({
+      loadFinalResult: expect.any(Function),
+      loadToolCalls: expect.any(Function),
+    });
+    expect(ProviderRegistry.createSubagentHistoryService(host, 'codex')).toBeNull();
+    expect(ProviderRegistry.createSubagentHistoryService(host, 'grok')).toBeNull();
+    expect(ProviderRegistry.createSubagentHistoryService(host, 'opencode')).toBeNull();
+    expect(ProviderRegistry.createSubagentHistoryService(host, 'pi')).toBeNull();
   });
 
   it('returns a settings reconciler for the default provider', () => {
@@ -64,14 +74,6 @@ describe('ProviderRegistry', () => {
     )).toThrow('Provider "nonexistent" is not registered.');
   });
 
-  it('creates a Codex runtime', () => {
-    const runtime = ProviderRegistry.createChatRuntime({
-      providerId: 'codex',
-      plugin: {} as any,
-    });
-    expect(runtime.providerId).toBe('codex');
-  });
-
   it('returns Codex capabilities', () => {
     const caps = ProviderRegistry.getCapabilities('codex');
     expect(caps.providerId).toBe('codex');
@@ -90,6 +92,35 @@ describe('ProviderRegistry', () => {
     expect(caps.supportsFork).toBe(false);
   });
 
+  it('registers provider-owned subagent protocols outside the capability matrix', () => {
+    const claudeAdapter = ProviderRegistry.getSubagentAdapter('claude');
+    expect(claudeAdapter).toMatchObject({
+      protocol: 'managed-agent',
+    });
+    const opencodeAdapter = ProviderRegistry.getSubagentAdapter('opencode');
+    expect(opencodeAdapter).toMatchObject({
+      protocol: 'managed-agent',
+    });
+    expect(ProviderRegistry.getSubagentAdapter('grok')).toMatchObject({
+      protocol: 'lifecycle',
+    });
+    expect(ProviderRegistry.getSubagentAdapter('codex')).toMatchObject({
+      protocol: 'lifecycle',
+    });
+    expect(ProviderRegistry.getSubagentAdapter('pi')).toBeNull();
+
+    expect(claudeAdapter?.isSpawnTool('Agent')).toBe(true);
+    expect(claudeAdapter?.isSpawnTool('Task')).toBe(true);
+    expect(opencodeAdapter?.isSpawnTool('Agent')).toBe(true);
+    expect(opencodeAdapter?.isSpawnTool('Task')).toBe(false);
+
+    for (const providerId of ['claude', 'opencode', 'grok', 'codex', 'pi'] as const) {
+      expect(ProviderRegistry.getCapabilities(providerId)).not.toHaveProperty(
+        'supportsLegacySubagentTools',
+      );
+    }
+  });
+
   it('returns Pi capabilities', () => {
     const caps = ProviderRegistry.getCapabilities('pi');
     expect(caps.providerId).toBe('pi');
@@ -103,6 +134,7 @@ describe('ProviderRegistry', () => {
     const ids = ProviderRegistry.getRegisteredProviderIds();
     expect(ids).toContain('claude');
     expect(ids).toContain('codex');
+    expect(ids).toContain('grok');
     expect(ids).toContain('pi');
   });
 
@@ -119,6 +151,12 @@ describe('ProviderRegistry', () => {
     })).toEqual(['codex', 'claude']);
     expect(ProviderRegistry.getEnabledProviderIds({
       providerConfigs: {
+        claude: { enabled: false },
+        codex: { enabled: true },
+      },
+    })).toEqual(['codex']);
+    expect(ProviderRegistry.getEnabledProviderIds({
+      providerConfigs: {
         codex: { enabled: true },
         opencode: { enabled: true },
       },
@@ -126,15 +164,86 @@ describe('ProviderRegistry', () => {
     expect(ProviderRegistry.getEnabledProviderIds({
       providerConfigs: {
         codex: { enabled: true },
+        grok: { enabled: true },
         opencode: { enabled: true },
         pi: { enabled: true },
       },
-    })).toEqual(['opencode', 'pi', 'codex', 'claude']);
+    })).toEqual(['opencode', 'pi', 'grok', 'codex', 'claude']);
+  });
+
+  it('exposes the blank-tab provider order from top to bottom', () => {
+    expect(ProviderRegistry.getBlankTabProviderIds({
+      providerConfigs: {
+        codex: { enabled: true },
+        grok: { enabled: true },
+        opencode: { enabled: true },
+        pi: { enabled: true },
+      },
+    })).toEqual(['claude', 'codex', 'grok', 'pi', 'opencode']);
+  });
+
+  it('exposes title generation models only from enabled providers', () => {
+    const disabledSettings = {
+      providerConfigs: {
+        codex: {
+          discoveredModels: TEST_CODEX_CATALOG,
+          enabled: false,
+        },
+      },
+    };
+    const enabledSettings = {
+      providerConfigs: {
+        codex: {
+          discoveredModels: TEST_CODEX_CATALOG,
+          enabled: true,
+        },
+      },
+    };
+
+    expect(
+      ProviderRegistry.getTitleGenerationModelOptions(disabledSettings)
+        .some(option => option.value === TEST_CODEX_MODEL),
+    ).toBe(false);
+    expect(
+      ProviderRegistry.getTitleGenerationModelOptions(enabledSettings)
+        .some(option => option.value === TEST_CODEX_MODEL),
+    ).toBe(true);
+
+    const claudeDisabledSettings = {
+      providerConfigs: {
+        claude: { enabled: false },
+        codex: {
+          discoveredModels: TEST_CODEX_CATALOG,
+          enabled: true,
+        },
+      },
+    };
+    expect(
+      ProviderRegistry.getTitleGenerationModelOptions(claudeDisabledSettings)
+        .some(option => option.value === 'sonnet'),
+    ).toBe(false);
+  });
+
+  it('prefixes title generation model labels with their provider names', () => {
+    const options = ProviderRegistry.getTitleGenerationModelOptions({
+      providerConfigs: {
+        codex: {
+          discoveredModels: TEST_CODEX_CATALOG,
+          enabled: true,
+        },
+      },
+    });
+
+    expect(options.find(option => option.value === TEST_CODEX_MODEL)?.label)
+      .toBe(`Codex: ${TEST_CODEX_MODEL_LABEL}`);
+    expect(options.find(option => option.value === 'sonnet')?.label)
+      .toBe('Claude: Sonnet');
   });
 
   it('returns the display name from provider registration metadata', () => {
     expect(ProviderRegistry.getProviderDisplayName('claude')).toBe('Claude');
     expect(ProviderRegistry.getProviderDisplayName('codex')).toBe('Codex');
+    expect(ProviderRegistry.getProviderDisplayName('grok')).toBe('Grok');
   });
 
   it('routes auto title generation to Claude independently of chat provider state', async () => {
@@ -168,6 +277,34 @@ describe('ProviderRegistry', () => {
     });
   });
 
+  it('routes automatic title generation away from Claude when Claude is disabled', async () => {
+    const providerCalls: ProviderId[] = [];
+    const originalCreate = ProviderRegistry.createTitleGenerationService.bind(ProviderRegistry);
+    jest.spyOn(ProviderRegistry, 'createTitleGenerationService')
+      .mockImplementation((plugin: any, providerId?: ProviderId) => {
+        if (!providerId) {
+          return originalCreate(plugin);
+        }
+        providerCalls.push(providerId);
+        return createMockTitleService(providerId);
+      });
+
+    const service = ProviderRegistry.createTitleGenerationService({
+      settings: {
+        settingsProvider: 'codex',
+        titleGenerationModel: '',
+        providerConfigs: {
+          claude: { enabled: false },
+          codex: { enabled: true },
+        },
+      },
+    } as any);
+
+    await service.generateTitle('conv-1', 'hello', jest.fn());
+
+    expect(providerCalls).toEqual(['codex']);
+  });
+
   it('routes explicit title model selections to the owning provider', async () => {
     const providerCalls: ProviderId[] = [];
     const originalCreate = ProviderRegistry.createTitleGenerationService.bind(ProviderRegistry);
@@ -182,9 +319,9 @@ describe('ProviderRegistry', () => {
 
     const service = ProviderRegistry.createTitleGenerationService({
       settings: {
-        titleGenerationModel: DEFAULT_CODEX_PRIMARY_MODEL,
+        titleGenerationModel: TEST_CODEX_MODEL,
         providerConfigs: {
-          codex: { enabled: true },
+          codex: { enabled: true, visibleModels: [TEST_CODEX_MODEL] },
         },
       },
     } as any);
@@ -197,6 +334,35 @@ describe('ProviderRegistry', () => {
       success: true,
       title: 'codex title',
     });
+  });
+
+  it('does not route title generation through a disabled model provider', async () => {
+    const providerCalls: ProviderId[] = [];
+    const originalCreate = ProviderRegistry.createTitleGenerationService.bind(ProviderRegistry);
+    jest.spyOn(ProviderRegistry, 'createTitleGenerationService')
+      .mockImplementation((plugin: any, providerId?: ProviderId) => {
+        if (!providerId) {
+          return originalCreate(plugin);
+        }
+        providerCalls.push(providerId);
+        return createMockTitleService(providerId);
+      });
+
+    const service = ProviderRegistry.createTitleGenerationService({
+      settings: {
+        titleGenerationModel: TEST_CODEX_MODEL,
+        providerConfigs: {
+          codex: {
+            discoveredModels: TEST_CODEX_CATALOG,
+            enabled: false,
+          },
+        },
+      },
+    } as any);
+
+    await service.generateTitle('conv-1', 'hello', jest.fn());
+
+    expect(providerCalls).toEqual(['claude']);
   });
 
   it('suppresses stale callbacks when a newer title generation replaces the old one', async () => {
@@ -216,7 +382,7 @@ describe('ProviderRegistry', () => {
       settings: {
         titleGenerationModel: 'sonnet',
         providerConfigs: {
-          codex: { enabled: true },
+          codex: { enabled: true, visibleModels: [TEST_CODEX_MODEL] },
         },
       },
     } as any;
@@ -224,7 +390,7 @@ describe('ProviderRegistry', () => {
     const callback = jest.fn();
 
     const first = service.generateTitle('conv-1', 'first', callback);
-    plugin.settings.titleGenerationModel = DEFAULT_CODEX_PRIMARY_MODEL;
+    plugin.settings.titleGenerationModel = TEST_CODEX_MODEL;
     await service.generateTitle('conv-1', 'second', callback);
     await claudeService.resolve({ success: true, title: 'stale title' });
     await first;

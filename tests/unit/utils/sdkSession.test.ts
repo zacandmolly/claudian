@@ -4,10 +4,11 @@ import * as os from 'os';
 
 import {
   collectAsyncSubagentResults,
-  deleteSDKSession,
   encodeVaultPathForSDK,
   filterActiveBranch,
+  getLastSDKSessionModel,
   getSDKProjectsPath,
+  getSDKSessionAvailability,
   getSDKSessionPath,
   isValidSessionId,
   loadSDKSessionMessages,
@@ -36,6 +37,62 @@ describe('sdkSession', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockOs.homedir.mockReturnValue('/Users/test');
+  });
+
+  it('finds the last non-synthetic model on the active Claude branch', () => {
+    const entries: SDKNativeMessage[] = [
+      { type: 'assistant', uuid: 'a1', message: { model: 'claude-opus-4-6' } },
+      {
+        type: 'user',
+        uuid: 'u2',
+        parentUuid: 'a1',
+        message: { role: 'user', content: 'Continue' },
+      },
+      {
+        type: 'assistant',
+        uuid: 'a2',
+        parentUuid: 'u2',
+        message: { model: '<synthetic>' },
+      },
+      {
+        type: 'assistant',
+        uuid: 'a3',
+        parentUuid: 'a2',
+        message: { model: 'deepseek-v4-pro' },
+      },
+    ];
+
+    expect(getLastSDKSessionModel(entries)).toBe('deepseek-v4-pro');
+    expect(getLastSDKSessionModel(entries, 'a1')).toBe('claude-opus-4-6');
+  });
+
+  it('does not recover a Claude model from a stale rewind checkpoint', () => {
+    const entries: SDKNativeMessage[] = [
+      { type: 'user', uuid: 'u1', parentUuid: null },
+      {
+        type: 'assistant',
+        uuid: 'a1',
+        parentUuid: 'u1',
+        message: { model: 'claude-sonnet-4-5' },
+      },
+      { type: 'user', uuid: 'u2', parentUuid: 'a1' },
+      {
+        type: 'assistant',
+        uuid: 'a2',
+        parentUuid: 'u2',
+        message: { model: 'claude-opus-4-6' },
+      },
+      { type: 'user', uuid: 'u3', parentUuid: 'a1' },
+      {
+        type: 'assistant',
+        uuid: 'a3',
+        parentUuid: 'u3',
+        message: { model: 'claude-haiku-4-5' },
+      },
+    ];
+
+    expect(getLastSDKSessionModel(entries, 'missing-checkpoint')).toBeNull();
+    expect(getLastSDKSessionModel(entries, 'a2')).toBeNull();
   });
 
   describe('encodeVaultPathForSDK', () => {
@@ -101,6 +158,72 @@ describe('sdkSession', () => {
       const projectsPath = getSDKProjectsPath();
       expect(projectsPath).toBe('/Users/test/.claude/projects');
     });
+
+    it('uses CLAUDE_CONFIG_DIR from the effective SDK environment', () => {
+      const projectsPath = getSDKProjectsPath({
+        environment: { CLAUDE_CONFIG_DIR: '/custom/claude' },
+        vaultPath: '/Users/test/vault',
+      });
+
+      expect(projectsPath).toBe('/custom/claude/projects');
+    });
+
+    it('resolves a relative CLAUDE_CONFIG_DIR from the SDK working directory', () => {
+      const projectsPath = getSDKProjectsPath({
+        environment: { CLAUDE_CONFIG_DIR: '.claude-custom' },
+        vaultPath: '/Users/test/vault',
+      });
+
+      expect(projectsPath).toBe('/Users/test/vault/.claude-custom/projects');
+    });
+
+    it('falls back to the default directory when CLAUDE_CONFIG_DIR is unset', () => {
+      const projectsPath = getSDKProjectsPath({
+        environment: {},
+        vaultPath: '/Users/test/vault',
+      });
+
+      expect(projectsPath).toBe('/Users/test/.claude/projects');
+    });
+
+    it('uses the effective SDK HOME when CLAUDE_CONFIG_DIR is unset', () => {
+      const projectsPath = getSDKProjectsPath({
+        environment: { HOME: '/custom/home' },
+        hostPlatform: 'linux',
+        vaultPath: '/Users/test/vault',
+      });
+
+      expect(projectsPath).toBe('/custom/home/.claude/projects');
+    });
+
+    it('uses the effective SDK USERPROFILE on Windows', () => {
+      const projectsPath = getSDKProjectsPath({
+        environment: { USERPROFILE: '/custom/windows-home' },
+        hostPlatform: 'win32',
+        vaultPath: '/Users/test/vault',
+      });
+
+      expect(projectsPath).toBe('/custom/windows-home/.claude/projects');
+    });
+
+    it('resolves an empty SDK HOME from the SDK working directory', () => {
+      const projectsPath = getSDKProjectsPath({
+        environment: { HOME: '' },
+        hostPlatform: 'linux',
+        vaultPath: '/Users/test/vault',
+      });
+
+      expect(projectsPath).toBe('/Users/test/vault/.claude/projects');
+    });
+
+    it('preserves an explicitly empty CLAUDE_CONFIG_DIR like the SDK', () => {
+      const projectsPath = getSDKProjectsPath({
+        environment: { CLAUDE_CONFIG_DIR: '' },
+        vaultPath: '/Users/test/vault',
+      });
+
+      expect(projectsPath).toBe('/Users/test/vault/projects');
+    });
   });
 
   describe('isValidSessionId', () => {
@@ -147,6 +270,15 @@ describe('sdkSession', () => {
     it('throws error for empty session ID', () => {
       expect(() => getSDKSessionPath('/Users/test/vault', '')).toThrow('Invalid session ID');
     });
+
+    it('builds session paths under the effective Claude config directory', () => {
+      const sessionPath = getSDKSessionPath('/Users/test/vault', 'session-123', {
+        environment: { CLAUDE_CONFIG_DIR: '/custom/claude' },
+        vaultPath: '/Users/test/vault',
+      });
+
+      expect(sessionPath).toBe('/custom/claude/projects/-Users-test-vault/session-123.jsonl');
+    });
   });
 
   describe('sdkSessionExists', () => {
@@ -177,38 +309,128 @@ describe('sdkSession', () => {
     });
   });
 
-  describe('deleteSDKSession', () => {
-    it('deletes session file when it exists', async () => {
-      mockExistsSync.mockReturnValue(true);
-      mockFsPromises.unlink.mockResolvedValue(undefined);
+  describe('getSDKSessionAvailability', () => {
+    it('reports an available session', async () => {
+      mockFsPromises.access.mockResolvedValue(undefined);
 
-      await deleteSDKSession('/Users/test/vault', 'session-abc');
-
-      expect(mockFsPromises.unlink).toHaveBeenCalledWith(
-        '/Users/test/.claude/projects/-Users-test-vault/session-abc.jsonl'
+      await expect(getSDKSessionAvailability(
+        '/Users/test/vault',
+        'session-abc',
+      )).resolves.toBe('available');
+      expect(mockFsPromises.access).toHaveBeenCalledWith(
+        '/Users/test/.claude/projects/-Users-test-vault/session-abc.jsonl',
       );
     });
 
-    it('does nothing when session file does not exist', async () => {
-      mockExistsSync.mockReturnValue(false);
+    it('reports a missing session when a complete scan finds no transcript', async () => {
+      mockFsPromises.access.mockRejectedValue(
+        Object.assign(new Error('Missing'), { code: 'ENOENT' }),
+      );
+      mockFsPromises.readdir.mockResolvedValue([]);
 
-      await deleteSDKSession('/Users/test/vault', 'nonexistent');
-
-      expect(mockFsPromises.unlink).not.toHaveBeenCalled();
+      await expect(getSDKSessionAvailability(
+        '/Users/test/vault',
+        'session-missing',
+      )).resolves.toBe('missing');
     });
 
-    it('fails silently when unlink throws', async () => {
-      mockExistsSync.mockReturnValue(true);
-      mockFsPromises.unlink.mockRejectedValue(new Error('Permission denied'));
+    it('reports a session found under a previous vault project as relocated', async () => {
+      mockFsPromises.access.mockRejectedValue(
+        Object.assign(new Error('Missing'), { code: 'ENOENT' }),
+      );
+      mockFsPromises.readdir
+        .mockResolvedValueOnce([{
+          isDirectory: () => true,
+          isFile: () => false,
+          name: '-Users-test-previous-vault',
+        }] as any)
+        .mockResolvedValueOnce([{
+          isDirectory: () => false,
+          isFile: () => true,
+          name: 'session-relocated.jsonl',
+        }] as any);
 
-      // Should not throw
-      await expect(deleteSDKSession('/Users/test/vault', 'session-err')).resolves.toBeUndefined();
+      await expect(getSDKSessionAvailability(
+        '/Users/test/vault',
+        'session-relocated',
+      )).resolves.toBe('relocated');
     });
 
-    it('does nothing for invalid session ID', async () => {
-      await deleteSDKSession('/Users/test/vault', '../invalid');
+    it('finds relocated sessions in nested project directories', async () => {
+      mockFsPromises.access.mockRejectedValue(
+        Object.assign(new Error('Missing'), { code: 'ENOENT' }),
+      );
+      mockFsPromises.readdir
+        .mockResolvedValueOnce([{
+          isDirectory: () => true,
+          isFile: () => false,
+          name: '-Users-test-current-project',
+        }] as any)
+        .mockResolvedValueOnce([{
+          isDirectory: () => true,
+          isFile: () => false,
+          name: '-Users-test-previous-vault',
+        }] as any)
+        .mockResolvedValueOnce([{
+          isDirectory: () => false,
+          isFile: () => true,
+          name: 'session-nested.jsonl',
+        }] as any);
 
-      expect(mockFsPromises.unlink).not.toHaveBeenCalled();
+      await expect(getSDKSessionAvailability(
+        '/Users/test/vault',
+        'session-nested',
+      )).resolves.toBe('relocated');
+    });
+
+    it('reports unknown when the local Claude projects root is absent', async () => {
+      mockFsPromises.access.mockRejectedValue(
+        Object.assign(new Error('Missing'), { code: 'ENOENT' }),
+      );
+      mockFsPromises.readdir.mockRejectedValue(
+        Object.assign(new Error('Missing root'), { code: 'ENOENT' }),
+      );
+
+      await expect(getSDKSessionAvailability(
+        '/Users/test/vault',
+        'session-on-another-machine',
+      )).resolves.toBe('unknown');
+    });
+
+    it('reports unknown for other filesystem failures', async () => {
+      mockFsPromises.access.mockRejectedValue(
+        Object.assign(new Error('Permission denied'), { code: 'EACCES' }),
+      );
+
+      await expect(getSDKSessionAvailability(
+        '/Users/test/vault',
+        'session-inaccessible',
+      )).resolves.toBe('unknown');
+    });
+
+    it('reports unknown when an unscanned symlink could contain the transcript', async () => {
+      mockFsPromises.access.mockRejectedValue(
+        Object.assign(new Error('Missing'), { code: 'ENOENT' }),
+      );
+      mockFsPromises.readdir.mockResolvedValue([{
+        isDirectory: () => false,
+        isFile: () => false,
+        isSymbolicLink: () => true,
+        name: 'linked-project',
+      }] as any);
+
+      await expect(getSDKSessionAvailability(
+        '/Users/test/vault',
+        'session-in-linked-project',
+      )).resolves.toBe('unknown');
+    });
+
+    it('reports unknown for an invalid session ID', async () => {
+      await expect(getSDKSessionAvailability(
+        '/Users/test/vault',
+        '../invalid',
+      )).resolves.toBe('unknown');
+      expect(mockFsPromises.access).not.toHaveBeenCalled();
     });
   });
 
@@ -236,6 +458,24 @@ describe('sdkSession', () => {
       expect(result.messages[0].type).toBe('user');
       expect(result.messages[1].type).toBe('assistant');
       expect(result.skippedLines).toBe(0);
+    });
+
+    it('reads from the effective Claude config directory', async () => {
+      mockExistsSync.mockReturnValue(true);
+      mockFsPromises.readFile.mockResolvedValue(
+        '{"type":"user","uuid":"u1","message":{"content":"Hello"}}',
+      );
+
+      const result = await readSDKSession('/Users/test/vault', 'session-custom', {
+        environment: { CLAUDE_CONFIG_DIR: '/custom/claude' },
+        vaultPath: '/Users/test/vault',
+      });
+
+      expect(result.messages).toHaveLength(1);
+      expect(mockFsPromises.readFile).toHaveBeenCalledWith(
+        '/custom/claude/projects/-Users-test-vault/session-custom.jsonl',
+        'utf-8',
+      );
     });
 
     it('skips invalid JSON lines and reports count', async () => {
@@ -929,6 +1169,67 @@ describe('sdkSession', () => {
       expect(result.messages[1].toolCalls![0].status).toBe('completed');
       expect(result.messages[1].content).toContain('Let me search');
       expect(result.messages[1].content).toContain('I found 10 results about cats.');
+    });
+
+    it('hydrates Claude task mutations as TodoWrite snapshots', async () => {
+      mockExistsSync.mockReturnValue(true);
+      mockFsPromises.readFile.mockResolvedValue([
+        '{"type":"user","uuid":"u1","timestamp":"2024-01-15T10:00:00Z","message":{"content":"Fix the issue"}}',
+        '{"type":"assistant","uuid":"a1","timestamp":"2024-01-15T10:01:00Z","message":{"content":[{"type":"tool_use","id":"create-1","name":"TaskCreate","input":{"subject":"Inspect issue","activeForm":"Inspecting issue"}}]}}',
+        '{"type":"user","uuid":"r1","timestamp":"2024-01-15T10:02:00Z","toolUseResult":{"task":{"id":"1","subject":"Inspect issue"}},"message":{"content":[{"type":"tool_result","tool_use_id":"create-1","content":"Task #1 created successfully: Inspect issue"}]}}',
+        '{"type":"assistant","uuid":"a2","timestamp":"2024-01-15T10:03:00Z","message":{"content":[{"type":"tool_use","id":"create-2","name":"TaskCreate","input":{"subject":"Implement fix"}}]}}',
+        '{"type":"user","uuid":"r2","timestamp":"2024-01-15T10:04:00Z","toolUseResult":{"task":{"id":"2","subject":"Implement fix"}},"message":{"content":[{"type":"tool_result","tool_use_id":"create-2","content":"Task #2 created successfully: Implement fix"}]}}',
+        '{"type":"assistant","uuid":"a3","timestamp":"2024-01-15T10:05:00Z","message":{"content":[{"type":"tool_use","id":"update-1","name":"TaskUpdate","input":{"taskId":"1","status":"completed"}},{"type":"tool_use","id":"delete-2","name":"TaskUpdate","input":{"taskId":"2","status":"deleted"}}]}}',
+        '{"type":"user","uuid":"r3","timestamp":"2024-01-15T10:06:00Z","toolUseResult":{"success":true,"taskId":"1","updatedFields":["status"],"statusChange":{"from":"pending","to":"completed"}},"message":{"content":[{"type":"tool_result","tool_use_id":"update-1","content":"Updated task #1 status"}]}}',
+        '{"type":"user","uuid":"r4","timestamp":"2024-01-15T10:07:00Z","toolUseResult":{"success":true,"taskId":"2","updatedFields":["deleted"],"statusChange":{"from":"pending","to":"deleted"}},"message":{"content":[{"type":"tool_result","tool_use_id":"delete-2","content":"Updated task #2 deleted"}]}}',
+      ].join('\n'));
+
+      const result = await loadSDKSessionMessages('/Users/test/vault', 'session-task-tools');
+      const taskCalls = result.messages
+        .flatMap(message => message.toolCalls ?? [])
+        .filter(toolCall => toolCall.name === 'TodoWrite');
+
+      expect(taskCalls).toHaveLength(4);
+      expect(taskCalls[0].providerPayload).toMatchObject({
+        rawName: 'TaskCreate',
+        rawInput: { subject: 'Inspect issue', activeForm: 'Inspecting issue' },
+      });
+      expect(taskCalls.at(-1)?.input).toEqual({
+        todos: [{
+          id: '1',
+          content: 'Inspect issue',
+          activeForm: 'Inspecting issue',
+          status: 'completed',
+        }],
+      });
+    });
+
+    it('preserves Claude task state across compacted history', async () => {
+      mockExistsSync.mockReturnValue(true);
+      mockFsPromises.readFile.mockResolvedValue([
+        '{"type":"user","uuid":"u1","timestamp":"2024-01-15T10:00:00Z","message":{"content":"Fix the issue"}}',
+        '{"type":"assistant","uuid":"a1","timestamp":"2024-01-15T10:01:00Z","message":{"content":[{"type":"tool_use","id":"create-1","name":"TaskCreate","input":{"subject":"Inspect issue","activeForm":"Inspecting issue"}}]}}',
+        '{"type":"user","uuid":"r1","timestamp":"2024-01-15T10:02:00Z","toolUseResult":{"task":{"id":"1","subject":"Inspect issue"}},"message":{"content":[{"type":"tool_result","tool_use_id":"create-1","content":"Task #1 created successfully: Inspect issue"}]}}',
+        '{"type":"system","subtype":"compact_boundary","uuid":"c1","timestamp":"2024-01-15T10:03:00Z"}',
+        '{"type":"user","uuid":"summary","timestamp":"2024-01-15T10:03:01Z","isMeta":true,"message":{"content":"This session is being continued from a previous conversation"}}',
+        '{"type":"user","uuid":"u2","timestamp":"2024-01-15T10:04:00Z","message":{"content":"Continue"}}',
+        '{"type":"assistant","uuid":"a2","timestamp":"2024-01-15T10:05:00Z","message":{"content":[{"type":"tool_use","id":"update-1","name":"TaskUpdate","input":{"taskId":"1","status":"completed"}}]}}',
+        '{"type":"user","uuid":"r2","timestamp":"2024-01-15T10:06:00Z","toolUseResult":{"success":true,"taskId":"1","updatedFields":["status"],"statusChange":{"from":"pending","to":"completed"}},"message":{"content":[{"type":"tool_result","tool_use_id":"update-1","content":"Updated task #1 status"}]}}',
+      ].join('\n'));
+
+      const result = await loadSDKSessionMessages('/Users/test/vault', 'session-task-compact');
+      const taskCalls = result.messages
+        .flatMap(message => message.toolCalls ?? [])
+        .filter(toolCall => toolCall.name === 'TodoWrite');
+
+      expect(taskCalls.at(-1)?.input).toEqual({
+        todos: [{
+          id: '1',
+          content: 'Inspect issue',
+          activeForm: 'Inspecting issue',
+          status: 'completed',
+        }],
+      });
     });
 
     it('hydrates AskUserQuestion answers from result text when toolUseResult has no answers', async () => {
@@ -2354,6 +2655,44 @@ describe('sdkSession', () => {
       expect(taskToolCall.subagent!.toolCalls).toHaveLength(1);
       expect(taskToolCall.subagent!.toolCalls[0].name).toBe('Grep');
       expect(taskToolCall.subagent!.toolCalls[0].result).toBe('3 matches found');
+    });
+
+    it('loads subagent tool calls beside a relocated session transcript', async () => {
+      mockExistsSync.mockReturnValue(true);
+      mockFsPromises.readFile.mockImplementation(async (filePath: any) => {
+        const p = String(filePath);
+        if (p === '/old-project/session-sidecar.jsonl') {
+          return [
+            '{"type":"user","uuid":"u1","timestamp":"2024-01-15T10:00:00Z","message":{"content":"Review"}}',
+            '{"type":"assistant","uuid":"a1","timestamp":"2024-01-15T10:01:00Z","message":{"content":[{"type":"tool_use","id":"task-1","name":"Task","input":{"description":"Review","prompt":"check","run_in_background":true}}]}}',
+            '{"type":"user","uuid":"u2","timestamp":"2024-01-15T10:01:01Z","toolUseResult":{"isAsync":true,"agentId":"ae5eb9a"},"message":{"content":[{"type":"tool_result","tool_use_id":"task-1","content":"Launched"}]}}',
+          ].join('\n');
+        }
+        if (p === '/old-project/session-sidecar/subagents/agent-ae5eb9a.jsonl') {
+          return [
+            '{"type":"assistant","timestamp":"2024-01-15T10:02:00Z","message":{"content":[{"type":"tool_use","id":"sub-tool-1","name":"Grep","input":{"pattern":"TODO"}}]}}',
+            '{"type":"user","timestamp":"2024-01-15T10:02:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"sub-tool-1","content":"3 matches found"}]}}',
+          ].join('\n');
+        }
+        return '';
+      });
+
+      const result = await loadSDKSessionMessages(
+        '/Users/test/vault',
+        'session-sidecar',
+        undefined,
+        '/old-project/session-sidecar.jsonl',
+      );
+
+      const assistantMsg = result.messages.find(m => m.toolCalls?.some(tc => tc.name === 'Task'));
+      const taskToolCall = assistantMsg!.toolCalls!.find(tc => tc.name === 'Task')!;
+      expect(mockFsPromises.readFile).toHaveBeenCalledWith(
+        '/old-project/session-sidecar/subagents/agent-ae5eb9a.jsonl',
+        'utf-8',
+      );
+      expect(taskToolCall.subagent!.toolCalls).toEqual([
+        expect.objectContaining({ name: 'Grep', result: '3 matches found' }),
+      ]);
     });
   });
 });

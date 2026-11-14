@@ -14,11 +14,11 @@ import { getClaudeProviderSettings } from '@/providers/claude/settings';
 import {
   CONTEXT_WINDOW_1M,
   CONTEXT_WINDOW_STANDARD,
-  DEFAULT_CLAUDE_MODELS,
-  filterVisibleModelOptions,
   getContextWindowSize,
   normalizeEffortLevel,
-  normalizeVisibleModelVariant,
+  normalizeLegacyClaudeModelAlias,
+  resolveContextWindowSize,
+  supportsClaudeAdaptiveThinking,
   supportsXHighEffort,
 } from '@/providers/claude/types/models';
 import {
@@ -55,12 +55,40 @@ describe('types.ts', () => {
       expect(getClaudeProviderSettings(DEFAULT_SETTINGS).lastModel).toBe('haiku');
     });
 
+    it('should have no Claude model environment source by default', () => {
+      expect(getClaudeProviderSettings(DEFAULT_SETTINGS).modelEnvironmentType).toBe('');
+      expect(getClaudeProviderSettings(DEFAULT_SETTINGS).titleModelEnvironmentType).toBe('');
+    });
+
     it('should have empty custom Claude models by default', () => {
       expect(getClaudeProviderSettings(DEFAULT_SETTINGS).customModels).toBe('');
     });
 
+    it('should enable Claude by default for backward compatibility', () => {
+      expect(getClaudeProviderSettings(DEFAULT_SETTINGS).enabled).toBe(true);
+      expect(getClaudeProviderSettings({ providerConfigs: { claude: {} } }).enabled).toBe(true);
+    });
+
     it('should have lastCustomModel as empty string by default', () => {
       expect(DEFAULT_SETTINGS.lastCustomModel).toBe('');
+    });
+
+    it('should collapse file edits by default', () => {
+      expect(DEFAULT_SETTINGS.expandFileEditsByDefault).toBe(false);
+    });
+
+    it('should keep five agent processes warm by default', () => {
+      expect(DEFAULT_SETTINGS.maxWarmAgentProcesses).toBe(5);
+    });
+
+    it('should enable the right-side dual pane by default', () => {
+      expect(DEFAULT_SETTINGS.enableDualPane).toBe(true);
+      expect(DEFAULT_SETTINGS.dualPaneSide).toBe('right');
+      expect(DEFAULT_SETTINGS.collabGitPath).toBe('');
+    });
+
+    it('should restore tabs on startup by default', () => {
+      expect(DEFAULT_SETTINGS.restoreTabsOnStartup).toBe(true);
     });
   });
 
@@ -70,6 +98,7 @@ describe('types.ts', () => {
         userName: '',
         model: 'haiku',
         enableAutoTitleGeneration: true,
+        titleGenerationLocale: '',
         titleGenerationModel: '',
         thinkingBudget: 'off',
         serviceTier: 'default',
@@ -92,27 +121,33 @@ describe('types.ts', () => {
         claudeCliPath: '',
         claudeCliPathsByHost: {},
         loadUserClaudeSettings: false,
-        maxTabs: 3,
+        maxWarmAgentProcesses: 5,
         enableChrome: false,
         enableBangBash: false,
-        enableOpus1M: false,
-        enableSonnet1M: false,
-        tabBarPosition: 'input',
         enableAutoScroll: true,
         deferMathRenderingDuringStreaming: true,
+        expandFileEditsByDefault: false,
         chatViewPlacement: 'right-sidebar',
+        enableDualPane: true,
+        dualPaneSide: 'right',
+        restoreTabsOnStartup: true,
+        collabEnabled: false,
+        collabProjectsFolder: 'workspace',
+        collabGitPath: '',
         hiddenProviderCommands: {
           claude: [],
           codex: [],
         },
         effortLevel: 'high',
-        settingsProvider: 'claude',
+      settingsProvider: 'claude',
+      lastSelectedChatModel: null,
         codexEnabled: false,
         savedProviderModel: {},
         savedProviderEffort: {},
         savedProviderServiceTier: {},
         savedProviderThinkingBudget: {},
         savedProviderPermissionMode: {},
+        pendingProviderSessionInvalidations: {},
       };
 
       expect(settings.permissionMode).toBe('yolo');
@@ -124,6 +159,7 @@ describe('types.ts', () => {
         userName: '',
         model: 'anthropic/custom-model-v1',
         enableAutoTitleGeneration: true,
+        titleGenerationLocale: 'zh-CN',
         titleGenerationModel: '',
         thinkingBudget: 'medium',
         serviceTier: 'default',
@@ -146,27 +182,33 @@ describe('types.ts', () => {
         claudeCliPath: '',
         claudeCliPathsByHost: {},
         loadUserClaudeSettings: false,
-        maxTabs: 3,
+        maxWarmAgentProcesses: 5,
         enableChrome: false,
         enableBangBash: false,
-        enableOpus1M: false,
-        enableSonnet1M: false,
-        tabBarPosition: 'input',
         enableAutoScroll: true,
         deferMathRenderingDuringStreaming: true,
+        expandFileEditsByDefault: false,
         chatViewPlacement: 'right-sidebar',
+        enableDualPane: true,
+        dualPaneSide: 'right',
+        restoreTabsOnStartup: true,
+        collabEnabled: false,
+        collabProjectsFolder: 'workspace',
+        collabGitPath: '',
         hiddenProviderCommands: {
           claude: [],
           codex: [],
         },
         effortLevel: 'high',
-        settingsProvider: 'claude',
+      settingsProvider: 'claude',
+      lastSelectedChatModel: null,
         codexEnabled: false,
         savedProviderModel: {},
         savedProviderEffort: {},
         savedProviderServiceTier: {},
         savedProviderThinkingBudget: {},
         savedProviderPermissionMode: {},
+        pendingProviderSessionInvalidations: {},
       };
 
       expect(settings.model).toBe('anthropic/custom-model-v1');
@@ -177,6 +219,7 @@ describe('types.ts', () => {
         userName: '',
         model: 'sonnet',
         enableAutoTitleGeneration: true,
+        titleGenerationLocale: '',
         titleGenerationModel: '',
         lastClaudeModel: 'opus',
         lastCustomModel: 'custom/model',
@@ -201,27 +244,33 @@ describe('types.ts', () => {
         claudeCliPath: '',
         claudeCliPathsByHost: {},
         loadUserClaudeSettings: false,
-        maxTabs: 5,
+        maxWarmAgentProcesses: 5,
         enableChrome: false,
         enableBangBash: false,
-        enableOpus1M: false,
-        enableSonnet1M: false,
-        tabBarPosition: 'header',
         enableAutoScroll: false,
         deferMathRenderingDuringStreaming: true,
+        expandFileEditsByDefault: true,
         chatViewPlacement: 'right-sidebar',
+        enableDualPane: false,
+        dualPaneSide: 'left',
+        restoreTabsOnStartup: false,
+        collabEnabled: true,
+        collabProjectsFolder: 'Shared/Projects',
+        collabGitPath: '/usr/bin/git',
         hiddenProviderCommands: {
           claude: [],
           codex: [],
         },
         effortLevel: 'high',
-        settingsProvider: 'claude',
+      settingsProvider: 'claude',
+      lastSelectedChatModel: null,
         codexEnabled: false,
         savedProviderModel: {},
         savedProviderEffort: {},
         savedProviderServiceTier: {},
         savedProviderThinkingBudget: {},
         savedProviderPermissionMode: {},
+        pendingProviderSessionInvalidations: {},
       };
 
       expect(settings.lastClaudeModel).toBe('opus');
@@ -429,7 +478,7 @@ describe('types.ts', () => {
         providerId: 'claude',
         title: 'Test Conversation',
         createdAt: 1700000000000,
-        updatedAt: 1700000001000,
+        lastActivityAt: 1700000001000,
         sessionId: 'session-abc',
         messages: [],
       };
@@ -437,7 +486,7 @@ describe('types.ts', () => {
       expect(conversation.id).toBe('conv-123');
       expect(conversation.title).toBe('Test Conversation');
       expect(conversation.createdAt).toBe(1700000000000);
-      expect(conversation.updatedAt).toBe(1700000001000);
+      expect(conversation.lastActivityAt).toBe(1700000001000);
       expect(conversation.sessionId).toBe('session-abc');
       expect(conversation.messages).toEqual([]);
     });
@@ -448,7 +497,7 @@ describe('types.ts', () => {
         providerId: 'claude',
         title: 'New Chat',
         createdAt: Date.now(),
-        updatedAt: Date.now(),
+        lastActivityAt: Date.now(),
         sessionId: null,
         messages: [],
       };
@@ -467,7 +516,7 @@ describe('types.ts', () => {
         providerId: 'claude',
         title: 'Chat with Messages',
         createdAt: Date.now(),
-        updatedAt: Date.now(),
+        lastActivityAt: Date.now(),
         sessionId: 'session-xyz',
         messages,
       };
@@ -485,7 +534,7 @@ describe('types.ts', () => {
         providerId: 'claude',
         title: 'Test Conversation',
         createdAt: 1700000000000,
-        updatedAt: 1700000001000,
+        lastActivityAt: 1700000001000,
         messageCount: 5,
         preview: 'Hello, how can I...',
       };
@@ -493,7 +542,7 @@ describe('types.ts', () => {
       expect(meta.id).toBe('conv-123');
       expect(meta.title).toBe('Test Conversation');
       expect(meta.createdAt).toBe(1700000000000);
-      expect(meta.updatedAt).toBe(1700000001000);
+      expect(meta.lastActivityAt).toBe(1700000001000);
       expect(meta.messageCount).toBe(5);
       expect(meta.preview).toBe('Hello, how can I...');
     });
@@ -504,7 +553,7 @@ describe('types.ts', () => {
         providerId: 'claude',
         title: 'Empty Chat',
         createdAt: Date.now(),
-        updatedAt: Date.now(),
+        lastActivityAt: Date.now(),
         messageCount: 0,
         preview: 'New conversation',
       };
@@ -555,10 +604,20 @@ describe('types.ts', () => {
   });
 
   describe('getContextWindowSize', () => {
-    it('should return standard context window by default', () => {
-      expect(getContextWindowSize('sonnet')).toBe(CONTEXT_WINDOW_STANDARD);
-      expect(getContextWindowSize('opus')).toBe(CONTEXT_WINDOW_STANDARD);
+    it('should use the current built-in model context windows by default', () => {
+      expect(getContextWindowSize('sonnet')).toBe(CONTEXT_WINDOW_1M);
+      expect(getContextWindowSize('opus')).toBe(CONTEXT_WINDOW_1M);
       expect(getContextWindowSize('haiku')).toBe(CONTEXT_WINDOW_STANDARD);
+    });
+
+    it('should recognize current and legacy versioned context windows', () => {
+      expect(getContextWindowSize('claude-opus-4-6')).toBe(CONTEXT_WINDOW_1M);
+      expect(getContextWindowSize('claude-opus-4-8')).toBe(CONTEXT_WINDOW_1M);
+      expect(getContextWindowSize('claude-sonnet-4-6')).toBe(CONTEXT_WINDOW_1M);
+      expect(getContextWindowSize('claude-sonnet-5')).toBe(CONTEXT_WINDOW_1M);
+      expect(getContextWindowSize('claude-opus-4-5')).toBe(CONTEXT_WINDOW_STANDARD);
+      expect(getContextWindowSize('claude-sonnet-4-5')).toBe(CONTEXT_WINDOW_STANDARD);
+      expect(getContextWindowSize('claude-opus-4.8')).toBe(CONTEXT_WINDOW_1M);
     });
 
     it('should use custom limits when provided', () => {
@@ -568,15 +627,15 @@ describe('types.ts', () => {
 
     it('should fall back to default when model not in custom limits', () => {
       const customLimits = { 'other-model': 256000 };
-      expect(getContextWindowSize('sonnet', customLimits)).toBe(CONTEXT_WINDOW_STANDARD);
+      expect(getContextWindowSize('sonnet', customLimits)).toBe(CONTEXT_WINDOW_1M);
     });
 
     it('should handle empty custom limits object', () => {
-      expect(getContextWindowSize('sonnet', {})).toBe(CONTEXT_WINDOW_STANDARD);
+      expect(getContextWindowSize('sonnet', {})).toBe(CONTEXT_WINDOW_1M);
     });
 
     it('should handle undefined custom limits', () => {
-      expect(getContextWindowSize('sonnet', undefined)).toBe(CONTEXT_WINDOW_STANDARD);
+      expect(getContextWindowSize('sonnet', undefined)).toBe(CONTEXT_WINDOW_1M);
     });
 
     describe('defensive validation for invalid custom limit values', () => {
@@ -638,56 +697,60 @@ describe('types.ts', () => {
         expect(getContextWindowSize('claude-opus-4-6[1M]', customLimits)).toBe(500000);
       });
 
-      it('should return standard for models without [1m] suffix', () => {
-        expect(getContextWindowSize('opus')).toBe(CONTEXT_WINDOW_STANDARD);
-        expect(getContextWindowSize('sonnet')).toBe(CONTEXT_WINDOW_STANDARD);
+      it('should keep retired 1M variants on their current standard window', () => {
+        expect(getContextWindowSize('claude-opus-4-5[1m]')).toBe(CONTEXT_WINDOW_STANDARD);
+        expect(getContextWindowSize('claude-sonnet-4-5[1m]')).toBe(CONTEXT_WINDOW_STANDARD);
       });
     });
 
-    describe('filterVisibleModelOptions', () => {
-      it('should hide 1M variants when toggles are disabled', () => {
-        const models = filterVisibleModelOptions(DEFAULT_CLAUDE_MODELS, false, false).map((model) => model.value);
-        expect(models).toEqual(['haiku', 'sonnet', 'opus']);
+    describe('fable models', () => {
+      it('should default to 1M context window with no [1m] suffix needed', () => {
+        expect(getContextWindowSize('fable')).toBe(CONTEXT_WINDOW_1M);
+        expect(getContextWindowSize('claude-fable-5')).toBe(CONTEXT_WINDOW_1M);
+        expect(getContextWindowSize('claude-fable-6')).toBe(CONTEXT_WINDOW_1M);
       });
 
-      it('should swap in 1M variants when toggles are enabled', () => {
-        const models = filterVisibleModelOptions(DEFAULT_CLAUDE_MODELS, true, true).map((model) => model.value);
-        expect(models).toEqual(['haiku', 'sonnet[1m]', 'opus[1m]']);
+      it('should prefer custom limits over the fable default', () => {
+        const customLimits = { 'claude-fable-5': 500000 };
+        expect(getContextWindowSize('claude-fable-5', customLimits)).toBe(500000);
       });
 
-      it('should swap only opus when enableOpus1M is true and enableSonnet1M is false', () => {
-        const models = filterVisibleModelOptions(DEFAULT_CLAUDE_MODELS, true, false).map((model) => model.value);
-        expect(models).toEqual(['haiku', 'sonnet', 'opus[1m]']);
-      });
+      it('should preserve legacy Fable custom limits after alias migration', () => {
+        const customLimits = { 'claude-fable-5': 500000 };
 
-      it('should swap only sonnet when enableSonnet1M is true and enableOpus1M is false', () => {
-        const models = filterVisibleModelOptions(DEFAULT_CLAUDE_MODELS, false, true).map((model) => model.value);
-        expect(models).toEqual(['haiku', 'sonnet[1m]', 'opus']);
+        expect(getContextWindowSize('fable', customLimits)).toBe(500000);
+        expect(resolveContextWindowSize('fable', customLimits, 1000000)).toEqual({
+          contextWindow: 500000,
+          source: 'custom',
+        });
       });
     });
 
-    describe('normalizeVisibleModelVariant', () => {
-      it('should normalize built-in variants to the visible option', () => {
-        expect(normalizeVisibleModelVariant('sonnet', true, true)).toBe('sonnet[1m]');
-        expect(normalizeVisibleModelVariant('sonnet[1m]', false, false)).toBe('sonnet');
-        expect(normalizeVisibleModelVariant('opus', true, false)).toBe('opus[1m]');
-        expect(normalizeVisibleModelVariant('opus[1m]', false, true)).toBe('opus');
+    describe('normalizeLegacyClaudeModelAlias', () => {
+      it('should migrate legacy built-in variants to the current aliases', () => {
+        expect(normalizeLegacyClaudeModelAlias('sonnet[1m]')).toBe('sonnet');
+        expect(normalizeLegacyClaudeModelAlias('sonnet[1M]')).toBe('sonnet');
+        expect(normalizeLegacyClaudeModelAlias('opus[1m]')).toBe('opus');
+        expect(normalizeLegacyClaudeModelAlias('opus[1M]')).toBe('opus');
+        expect(normalizeLegacyClaudeModelAlias('claude-fable-5')).toBe('fable');
       });
 
-      it('should normalize built-in variants regardless of 1M suffix casing', () => {
-        expect(normalizeVisibleModelVariant('sonnet[1M]', false, false)).toBe('sonnet');
-        expect(normalizeVisibleModelVariant('opus[1M]', true, false)).toBe('opus[1m]');
-      });
-
-      it('should leave unrelated model ids unchanged', () => {
-        expect(normalizeVisibleModelVariant('', true, true)).toBe('');
-        expect(normalizeVisibleModelVariant('haiku', true, true)).toBe('haiku');
-        expect(normalizeVisibleModelVariant('custom-model', true, true)).toBe('custom-model');
+      it('should leave explicit and custom model ids unchanged', () => {
+        expect(normalizeLegacyClaudeModelAlias('')).toBe('');
+        expect(normalizeLegacyClaudeModelAlias('haiku')).toBe('haiku');
+        expect(normalizeLegacyClaudeModelAlias('claude-opus-4-6[1m]')).toBe('claude-opus-4-6[1m]');
+        expect(normalizeLegacyClaudeModelAlias('claude-fable-6')).toBe('claude-fable-6');
+        expect(normalizeLegacyClaudeModelAlias('custom-model')).toBe('custom-model');
       });
     });
   });
 
   describe('supportsXHighEffort', () => {
+    it('returns true for opaque custom model ids', () => {
+      expect(supportsXHighEffort('custom-model')).toBe(true);
+      expect(supportsXHighEffort('gateway/gpt-4.2')).toBe(true);
+    });
+
     it('returns true for opus aliases and 4.7+ opus ids', () => {
       expect(supportsXHighEffort('opus')).toBe(true);
       expect(supportsXHighEffort('opus[1m]')).toBe(true);
@@ -696,10 +759,57 @@ describe('types.ts', () => {
       expect(supportsXHighEffort('claude-opus-5')).toBe(true);
     });
 
-    it('returns false for non-opus models and older opus ids', () => {
-      expect(supportsXHighEffort('sonnet')).toBe(false);
+    it('returns true for sonnet aliases and sonnet 5+ ids', () => {
+      expect(supportsXHighEffort('sonnet')).toBe(true);
+      expect(supportsXHighEffort('sonnet[1m]')).toBe(true);
+      expect(supportsXHighEffort('claude-sonnet-5')).toBe(true);
+      expect(supportsXHighEffort('claude-sonnet-5-20260101')).toBe(true);
+      expect(supportsXHighEffort('claude-sonnet-6')).toBe(true);
+    });
+
+    it('returns false for non-opus/non-sonnet-5 models and older ids', () => {
+      expect(supportsXHighEffort('haiku')).toBe(false);
       expect(supportsXHighEffort('claude-sonnet-4-5')).toBe(false);
+      expect(supportsXHighEffort('claude-sonnet-4-6')).toBe(false);
       expect(supportsXHighEffort('claude-opus-4-6')).toBe(false);
+    });
+
+    it('returns true for fable models', () => {
+      expect(supportsXHighEffort('fable')).toBe(true);
+      expect(supportsXHighEffort('claude-fable-5')).toBe(true);
+      expect(supportsXHighEffort('claude-fable-6')).toBe(true);
+    });
+
+    it('limits DeepSeek Claude-adapter models to their supported range', () => {
+      expect(supportsXHighEffort('deepseek-v4-pro')).toBe(false);
+      expect(normalizeEffortLevel('deepseek-v4-pro', 'low')).toBe('high');
+      expect(normalizeEffortLevel('deepseek-v4-pro', 'xhigh')).toBe('high');
+      expect(normalizeEffortLevel('deepseek-v4-pro', 'max')).toBe('max');
+    });
+  });
+
+  describe('supportsClaudeAdaptiveThinking', () => {
+    it('keeps adaptive thinking for Claude and DeepSeek routes', () => {
+      expect(supportsClaudeAdaptiveThinking('opus')).toBe(true);
+      expect(supportsClaudeAdaptiveThinking('anthropic/claude-opus-4.8')).toBe(true);
+      expect(supportsClaudeAdaptiveThinking('deepseek-v4-flash')).toBe(true);
+    });
+
+    it('omits Claude-native flags for incompatible gateway models', () => {
+      expect(supportsClaudeAdaptiveThinking('kimi-k3[1m]')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('openrouter/fusion')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('openai/gpt-5.6-terra')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('anthropic/not-a-claude-model')).toBe(false);
+    });
+
+    it('omits Claude-native flags for unprefixed GPT ids, including GPT-6', () => {
+      expect(supportsClaudeAdaptiveThinking('gpt-5.6-sol')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('GPT-6-Astra')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('gpt-6.1-terra')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('gpt-6.1-sol[1m]')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('gpt-6-cyber')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('openai/gpt-6-astra')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('claude-code/gpt-6.1-terra')).toBe(false);
     });
   });
 
@@ -707,6 +817,7 @@ describe('types.ts', () => {
     it('preserves supported effort levels', () => {
       expect(normalizeEffortLevel('claude-opus-4-7', 'xhigh')).toBe('xhigh');
       expect(normalizeEffortLevel('claude-sonnet-4-5', 'max')).toBe('max');
+      expect(normalizeEffortLevel('custom-model', 'xhigh')).toBe('xhigh');
     });
 
     it('clamps unsupported xhigh values to the model default', () => {

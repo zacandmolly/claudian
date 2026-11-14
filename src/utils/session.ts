@@ -5,7 +5,7 @@
  */
 
 import type { ChatMessage, ToolCallInfo } from '../core/types';
-import { extractUserQuery, formatCurrentNote } from './context';
+import { extractUserQuery, formatLinkedContent } from './context';
 
 // ============================================
 // Session Recovery
@@ -14,10 +14,23 @@ import { extractUserQuery, formatCurrentNote } from './context';
 const SESSION_ERROR_PATTERNS = [
   'session expired',
   'session not found',
+  'no conversation found with session id',
   'invalid session',
   'session invalid',
   'process exited with code',
 ] as const;
+
+export function getMissingSessionId(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : '';
+  const match = message.match(/no conversation found with session id:\s*([a-z0-9_-]+)/i);
+  return match?.[1] ?? null;
+}
+
+export function isSessionMissingError(error: unknown, expectedSessionId?: string): boolean {
+  const missingSessionId = getMissingSessionId(error);
+  return !!missingSessionId
+    && (!expectedSessionId || missingSessionId.toLowerCase() === expectedSessionId.toLowerCase());
+}
 
 const SESSION_ERROR_COMPOUND_PATTERNS = [
   { includes: ['session', 'expired'] },
@@ -118,10 +131,11 @@ export function truncateToolResult(result: string, maxLength = 500): string {
 }
 
 export function formatContextLine(message: ChatMessage): string | null {
-  if (!message.currentNote) {
+  const linkedContentPath = message.linkedContentPath ?? message.currentNote;
+  if (!linkedContentPath) {
     return null;
   }
-  return formatCurrentNote(message.currentNote);
+  return formatLinkedContent(linkedContentPath);
 }
 
 /**
@@ -155,7 +169,7 @@ export function buildContextFromHistory(messages: ChatMessage[]): string {
       continue;
     }
 
-    if (message.isInterrupt) {
+    if (message.isInterrupt && message.role === 'user') {
       continue;
     }
 

@@ -2,23 +2,26 @@ import { Notice, setIcon } from 'obsidian';
 import * as os from 'os';
 import * as path from 'path';
 
-import type { McpServerManager } from '../../../core/mcp/McpServerManager';
 import type {
   ProviderCapabilities,
   ProviderChatUIConfig,
+  ProviderId,
   ProviderModeSelectorConfig,
   ProviderPermissionModeToggleConfig,
   ProviderReasoningOption,
   ProviderServiceTierToggleConfig,
   ProviderUIOption,
 } from '../../../core/providers/types';
-import type {
-  ManagedMcpServer,
-  UsageInfo,
-} from '../../../core/types';
-import { appendCheckIcon, appendMcpIcon, createProviderIconSvg } from '../../../shared/icons';
+import type { UsageInfo } from '../../../core/types';
+import { createProviderIconSvg } from '../../../shared/icons';
+import {
+  cancelScheduledAnimationFrame,
+  scheduleAnimationFrame,
+  type ScheduledAnimationFrame,
+} from '../../../utils/animationFrame';
 import { filterValidPaths, findConflictingPath, isDuplicatePath, isValidDirectoryPath, validateDirectoryPath } from '../../../utils/externalContext';
 import { expandHomePath, normalizePathForFilesystem } from '../../../utils/path';
+import { toggleServiceTier } from '../actions/toggleServiceTier';
 
 interface ElectronOpenDialogResult {
   canceled: boolean;
@@ -47,7 +50,7 @@ export interface ToolbarSettings {
 }
 
 export interface ToolbarCallbacks {
-  onModelChange: (model: string) => Promise<void>;
+  onModelChange: (model: string, sourceProviderId?: ProviderId) => Promise<void>;
   onModeChange: (mode: string) => Promise<void>;
   onThinkingBudgetChange: (budget: string) => Promise<void>;
   onEffortLevelChange: (effort: string) => Promise<void>;
@@ -68,6 +71,10 @@ export class ModelSelector {
     this.callbacks = callbacks;
     this.container = parentEl.createDiv({ cls: 'claudian-model-selector' });
     this.render();
+    this.container.addEventListener('mouseenter', () => {
+      this.updateDisplay();
+      this.renderOptions();
+    });
   }
 
   private getAvailableModels() {
@@ -96,9 +103,19 @@ export class ModelSelector {
     const modelInfo = models.find(m => m.value === currentModel);
 
     const displayModel = modelInfo || models[0];
+    const icon = displayModel?.providerIcon
+      ?? this.callbacks.getUIConfig().getProviderIcon?.();
 
     this.buttonEl.empty();
 
+    if (icon) {
+      createProviderIconSvg(icon, {
+        className: 'claudian-model-provider-icon',
+        height: 12,
+        parent: this.buttonEl,
+        width: 12,
+      });
+    }
     const labelEl = this.buttonEl.createSpan({ cls: 'claudian-model-label' });
     labelEl.setText(displayModel?.label || 'Unknown');
   }
@@ -126,12 +143,12 @@ export class ModelSelector {
 
       const icon = model.providerIcon ?? this.callbacks.getUIConfig().getProviderIcon?.();
       if (icon) {
-        option.appendChild(createProviderIconSvg(icon, {
+        createProviderIconSvg(icon, {
           className: 'claudian-model-provider-icon',
           height: 12,
-          ownerDocument: option.ownerDocument,
+          parent: option,
           width: 12,
-        }));
+        });
       }
       option.createSpan({ text: model.label });
       if (model.description) {
@@ -141,7 +158,11 @@ export class ModelSelector {
       option.addEventListener('click', (e) => {
         e.stopPropagation();
         runToolbarAction(async () => {
-          await this.callbacks.onModelChange(model.value);
+          if (model.providerId) {
+            await this.callbacks.onModelChange(model.value, model.providerId);
+          } else {
+            await this.callbacks.onModelChange(model.value);
+          }
           this.updateDisplay();
           this.renderOptions();
         }, 'Failed to change model');
@@ -291,6 +312,9 @@ export class ThinkingBudgetSelector {
     for (const effort of [...options].reverse()) {
       const gearEl = optionsEl.createDiv({ cls: 'claudian-thinking-gear' });
       gearEl.setText(effort.label);
+      if (effort.description) {
+        gearEl.setAttribute('title', effort.description);
+      }
 
       if (effort.value === currentEffort) {
         gearEl.addClass('selected');
@@ -485,7 +509,9 @@ export class ServiceTierToggle {
     this.updateDisplay();
 
     this.buttonEl.addEventListener('click', () => {
-      runToolbarAction(() => this.toggle(), 'Failed to change service tier');
+      runToolbarAction(async () => {
+        await this.toggle();
+      }, 'Failed to change service tier');
     });
   }
 
@@ -504,27 +530,24 @@ export class ServiceTierToggle {
     }
 
     this.container.removeClass('claudian-hidden');
-    const current = this.callbacks.getSettings().serviceTier;
-    const isActive = current === toggleConfig.activeValue;
-    if (isActive) {
+    if (toggleConfig.isActive) {
       this.buttonEl.addClass('active');
     } else {
       this.buttonEl.removeClass('active');
     }
 
-    this.container.setAttribute('title', 'Toggle on/off fast mode');
+    const currentLabel = toggleConfig.isActive
+      ? toggleConfig.activeLabel
+      : toggleConfig.inactiveLabel;
+    this.container.setAttribute('title', `Fast mode: ${currentLabel}`);
   }
 
-  private async toggle() {
-    const toggleConfig = this.getToggleConfig();
-    if (!toggleConfig) return;
-
-    const current = this.callbacks.getSettings().serviceTier;
-    const next = current === toggleConfig.activeValue
-      ? toggleConfig.inactiveValue
-      : toggleConfig.activeValue;
-    await this.callbacks.onServiceTierChange(next);
-    this.updateDisplay();
+  async toggle(): Promise<boolean> {
+    const toggled = await toggleServiceTier(this.callbacks);
+    if (toggled) {
+      this.updateDisplay();
+    }
+    return toggled;
   }
 }
 
@@ -878,230 +901,6 @@ export class ExternalContextSelector {
   }
 }
 
-export class McpServerSelector {
-  private container: HTMLElement;
-  private iconEl: HTMLElement | null = null;
-  private badgeEl: HTMLElement | null = null;
-  private dropdownEl: HTMLElement | null = null;
-  private mcpManager: McpServerManager | null = null;
-  private enabledServers: Set<string> = new Set();
-  private onChangeCallback: ((enabled: Set<string>) => void) | null = null;
-  private visible = true;
-
-  constructor(parentEl: HTMLElement) {
-    this.container = parentEl.createDiv({ cls: 'claudian-mcp-selector' });
-    this.render();
-  }
-
-  setVisible(visible: boolean): void {
-    this.visible = visible;
-    if (!visible) {
-      this.container.addClass('claudian-hidden');
-    } else {
-      this.updateDisplay();
-    }
-  }
-
-  setMcpManager(manager: McpServerManager | null): void {
-    this.mcpManager = manager;
-    if (!manager && this.enabledServers.size > 0) {
-      this.enabledServers.clear();
-      this.onChangeCallback?.(this.enabledServers);
-    }
-    this.pruneEnabledServers();
-    this.updateDisplay();
-    this.renderDropdown();
-  }
-
-  setOnChange(callback: (enabled: Set<string>) => void): void {
-    this.onChangeCallback = callback;
-  }
-
-  getEnabledServers(): Set<string> {
-    return new Set(this.enabledServers);
-  }
-
-  addMentionedServers(names: Set<string>): void {
-    let changed = false;
-    for (const name of names) {
-      if (!this.enabledServers.has(name)) {
-        this.enabledServers.add(name);
-        changed = true;
-      }
-    }
-    if (changed) {
-      this.updateDisplay();
-      this.renderDropdown();
-    }
-  }
-
-  clearEnabled(): void {
-    this.enabledServers.clear();
-    this.updateDisplay();
-    this.renderDropdown();
-  }
-
-  setEnabledServers(names: string[]): void {
-    this.enabledServers = new Set(names);
-    this.pruneEnabledServers();
-    this.updateDisplay();
-    this.renderDropdown();
-  }
-
-  private pruneEnabledServers(): void {
-    if (!this.mcpManager) return;
-    const activeNames = new Set(this.mcpManager.getServers().filter((s) => s.enabled).map((s) => s.name));
-    let changed = false;
-    for (const name of this.enabledServers) {
-      if (!activeNames.has(name)) {
-        this.enabledServers.delete(name);
-        changed = true;
-      }
-    }
-    if (changed) {
-      this.onChangeCallback?.(this.enabledServers);
-    }
-  }
-
-  private render() {
-    this.container.empty();
-
-    const iconWrapper = this.container.createDiv({ cls: 'claudian-mcp-selector-icon-wrapper' });
-
-    this.iconEl = iconWrapper.createDiv({ cls: 'claudian-mcp-selector-icon' });
-    appendMcpIcon(this.iconEl);
-
-    this.badgeEl = iconWrapper.createDiv({ cls: 'claudian-mcp-selector-badge' });
-
-    this.updateDisplay();
-
-    this.dropdownEl = this.container.createDiv({ cls: 'claudian-mcp-selector-dropdown' });
-    this.renderDropdown();
-
-    // Re-render dropdown content on hover (CSS handles visibility)
-    this.container.addEventListener('mouseenter', () => {
-      this.renderDropdown();
-    });
-  }
-
-  private renderDropdown() {
-    if (!this.dropdownEl) return;
-    this.pruneEnabledServers();
-    this.dropdownEl.empty();
-
-    // Header
-    const headerEl = this.dropdownEl.createDiv({ cls: 'claudian-mcp-selector-header' });
-    headerEl.setText('Mcp servers');
-
-    // Server list
-    const listEl = this.dropdownEl.createDiv({ cls: 'claudian-mcp-selector-list' });
-
-    const allServers = this.mcpManager?.getServers() || [];
-    const servers = allServers.filter(s => s.enabled);
-
-    if (servers.length === 0) {
-      const emptyEl = listEl.createDiv({ cls: 'claudian-mcp-selector-empty' });
-      emptyEl.setText(allServers.length === 0 ? 'No MCP servers configured' : 'All MCP servers disabled');
-      return;
-    }
-
-    for (const server of servers) {
-      this.renderServerItem(listEl, server);
-    }
-  }
-
-  private renderServerItem(listEl: HTMLElement, server: ManagedMcpServer) {
-    const itemEl = listEl.createDiv({ cls: 'claudian-mcp-selector-item' });
-    itemEl.dataset.serverName = server.name;
-
-    const isEnabled = this.enabledServers.has(server.name);
-    if (isEnabled) {
-      itemEl.addClass('enabled');
-    }
-
-    // Checkbox
-    const checkEl = itemEl.createDiv({ cls: 'claudian-mcp-selector-check' });
-    if (isEnabled) {
-      appendCheckIcon(checkEl);
-    }
-
-    // Info
-    const infoEl = itemEl.createDiv({ cls: 'claudian-mcp-selector-item-info' });
-
-    const nameEl = infoEl.createSpan({ cls: 'claudian-mcp-selector-item-name' });
-    nameEl.setText(server.name);
-
-    // Badges
-    if (server.contextSaving) {
-      const csEl = infoEl.createSpan({ cls: 'claudian-mcp-selector-cs-badge' });
-      csEl.setText('@');
-      csEl.setAttribute('title', 'Context-saving: can also enable via @' + server.name);
-    }
-
-    // Click to toggle (use mousedown for more reliable capture)
-    itemEl.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      this.toggleServer(server.name, itemEl);
-    });
-  }
-
-  private toggleServer(name: string, itemEl: HTMLElement) {
-    if (this.enabledServers.has(name)) {
-      this.enabledServers.delete(name);
-    } else {
-      this.enabledServers.add(name);
-    }
-
-    // Update item visually in-place (immediate feedback)
-    const isEnabled = this.enabledServers.has(name);
-    const checkEl = itemEl.querySelector<HTMLElement>('.claudian-mcp-selector-check');
-
-    if (isEnabled) {
-      itemEl.addClass('enabled');
-      if (checkEl) appendCheckIcon(checkEl);
-    } else {
-      itemEl.removeClass('enabled');
-      if (checkEl) checkEl.empty();
-    }
-
-    this.updateDisplay();
-    this.onChangeCallback?.(this.enabledServers);
-  }
-
-  updateDisplay() {
-    this.pruneEnabledServers();
-    if (!this.iconEl || !this.badgeEl) return;
-
-    const count = this.enabledServers.size;
-    const hasServers = (this.mcpManager?.getServers().length || 0) > 0;
-
-    // Show/hide container based on whether there are servers and visibility
-    if (!hasServers || !this.visible) {
-      this.container.addClass('claudian-hidden');
-      return;
-    }
-    this.container.removeClass('claudian-hidden');
-
-    if (count > 0) {
-      this.iconEl.addClass('active');
-      this.iconEl.setAttribute('title', `${count} MCP server${count > 1 ? 's' : ''} enabled (click to manage)`);
-
-      // Show badge only when more than 1
-      if (count > 1) {
-        this.badgeEl.setText(String(count));
-        this.badgeEl.addClass('visible');
-      } else {
-        this.badgeEl.removeClass('visible');
-      }
-    } else {
-      this.iconEl.removeClass('active');
-      this.iconEl.setAttribute('title', 'Mcp servers (click to enable)');
-      this.badgeEl.removeClass('visible');
-    }
-  }
-}
-
 export class ContextUsageMeter {
   private container: HTMLElement;
   private fillPath: SVGPathElement | null = null;
@@ -1110,6 +909,10 @@ export class ContextUsageMeter {
 
   constructor(parentEl: HTMLElement) {
     this.container = parentEl.createDiv({ cls: 'claudian-context-meter' });
+    this.container.setAttribute('role', 'progressbar');
+    this.container.setAttribute('aria-label', 'Context usage');
+    this.container.setAttribute('aria-valuemin', '0');
+    this.container.setAttribute('aria-valuemax', '100');
     this.render();
     // Initially hidden
     this.container.addClass('claudian-hidden');
@@ -1141,20 +944,20 @@ export class ContextUsageMeter {
     const y2 = cy + radius * Math.sin(endRad);
 
     const gaugeEl = this.container.createDiv({ cls: 'claudian-context-meter-gauge' });
-    const svg = gaugeEl.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    const svg = gaugeEl.createSvg('svg');
     svg.setAttribute('width', String(size));
     svg.setAttribute('height', String(size));
     svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
 
     const pathData = `M ${x1} ${y1} A ${radius} ${radius} 0 1 1 ${x2} ${y2}`;
-    const backgroundPath = gaugeEl.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'path');
+    const backgroundPath = svg.createSvg('path');
     backgroundPath.classList.add('claudian-meter-bg');
     backgroundPath.setAttribute('d', pathData);
     backgroundPath.setAttribute('fill', 'none');
     backgroundPath.setAttribute('stroke-width', String(strokeWidth));
     backgroundPath.setAttribute('stroke-linecap', 'round');
 
-    const fillPath = gaugeEl.ownerDocument.createElementNS('http://www.w3.org/2000/svg', 'path');
+    const fillPath = svg.createSvg('path');
     fillPath.classList.add('claudian-meter-fill');
     fillPath.setAttribute('d', pathData);
     fillPath.setAttribute('fill', 'none');
@@ -1199,6 +1002,11 @@ export class ContextUsageMeter {
       tooltip += ' (Approaching limit, run `/compact` to continue)';
     }
     this.container.setAttribute('data-tooltip', tooltip);
+    this.container.setAttribute('aria-valuenow', String(usage.percentage));
+    this.container.setAttribute(
+      'aria-valuetext',
+      `${this.formatTokens(usage.contextTokens)} / ${this.formatTokens(usage.contextWindow)}`,
+    );
   }
 
   private formatTokens(tokens: number): string {
@@ -1209,6 +1017,93 @@ export class ContextUsageMeter {
   }
 }
 
+const TOOLBAR_COMPACT_CLASS = 'claudian-input-toolbar--compact';
+const ROW_CENTER_TOLERANCE = 1;
+
+/** Hides optional labels only when the full toolbar would wrap. */
+export class InputToolbarLayoutController {
+  private resizeObserver: ResizeObserver | null = null;
+  private mutationObserver: MutationObserver | null = null;
+  private pendingLayout: ScheduledAnimationFrame | null = null;
+
+  constructor(private readonly toolbarEl: HTMLElement) {
+    try {
+      this.observeLayoutChanges();
+      this.scheduleLayout();
+    } catch (error) {
+      this.destroy();
+      throw error;
+    }
+  }
+
+  refreshLayout(): void {
+    this.toolbarEl.classList.remove(TOOLBAR_COMPACT_CLASS);
+    this.toolbarEl.classList.toggle(TOOLBAR_COMPACT_CLASS, this.hasWrappedItems());
+  }
+
+  destroy(): void {
+    if (this.pendingLayout !== null) {
+      cancelScheduledAnimationFrame(this.pendingLayout);
+      this.pendingLayout = null;
+    }
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    this.mutationObserver?.disconnect();
+    this.mutationObserver = null;
+  }
+
+  private hasWrappedItems(): boolean {
+    const rowCenters = Array.from(this.toolbarEl.children)
+      .map((item) => item.getBoundingClientRect())
+      .filter((rect) => rect.width > 0 && rect.height > 0)
+      .map((rect) => rect.top + rect.height / 2);
+    const firstRowCenter = rowCenters[0];
+    if (firstRowCenter === undefined) return false;
+
+    return rowCenters.some((center) => Math.abs(center - firstRowCenter) > ROW_CENTER_TOLERANCE);
+  }
+
+  private scheduleLayout(): void {
+    if (this.pendingLayout !== null) {
+      cancelScheduledAnimationFrame(this.pendingLayout);
+    }
+    this.pendingLayout = scheduleAnimationFrame(() => {
+      this.pendingLayout = null;
+      this.refreshLayout();
+    }, this.toolbarEl.ownerDocument.defaultView);
+  }
+
+  private observeLayoutChanges(): void {
+    const ownerWindow = this.toolbarEl.ownerDocument.defaultView;
+    const ResizeObserverConstructor = ownerWindow?.ResizeObserver;
+    if (typeof ResizeObserverConstructor === 'function') {
+      this.resizeObserver = new ResizeObserverConstructor(() => this.scheduleLayout());
+      this.resizeObserver.observe(this.toolbarEl);
+    }
+
+    const MutationObserverConstructor = ownerWindow?.MutationObserver;
+    if (typeof MutationObserverConstructor !== 'function') return;
+
+    this.mutationObserver = new MutationObserverConstructor((mutations) => {
+      const hasContentChange = mutations.some((mutation) => (
+        mutation.type !== 'attributes'
+        || mutation.target !== this.toolbarEl
+        || mutation.attributeName !== 'class'
+      ));
+      if (hasContentChange) {
+        this.scheduleLayout();
+      }
+    });
+    this.mutationObserver.observe(this.toolbarEl, {
+      attributes: true,
+      attributeFilter: ['class'],
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+  }
+}
+
 export function createInputToolbar(
   parentEl: HTMLElement,
   callbacks: ToolbarCallbacks
@@ -1216,9 +1111,9 @@ export function createInputToolbar(
   modelSelector: ModelSelector;
   modeSelector: ModeSelector;
   thinkingBudgetSelector: ThinkingBudgetSelector;
-  contextUsageMeter: ContextUsageMeter | null;
+  contextUsageMeter: ContextUsageMeter;
+  layoutController: InputToolbarLayoutController;
   externalContextSelector: ExternalContextSelector;
-  mcpServerSelector: McpServerSelector;
   permissionToggle: PermissionToggle;
   serviceTierToggle: ServiceTierToggle;
 } {
@@ -1227,9 +1122,9 @@ export function createInputToolbar(
   const serviceTierToggle = new ServiceTierToggle(parentEl, callbacks);
   const contextUsageMeter = new ContextUsageMeter(parentEl);
   const externalContextSelector = new ExternalContextSelector(parentEl, callbacks);
-  const mcpServerSelector = new McpServerSelector(parentEl);
   const permissionToggle = new PermissionToggle(parentEl, callbacks);
   const modeSelector = new ModeSelector(parentEl, callbacks);
+  const layoutController = new InputToolbarLayoutController(parentEl);
 
   return {
     modelSelector,
@@ -1237,8 +1132,8 @@ export function createInputToolbar(
     thinkingBudgetSelector,
     serviceTierToggle,
     contextUsageMeter,
+    layoutController,
     externalContextSelector,
-    mcpServerSelector,
     permissionToggle,
   };
 }

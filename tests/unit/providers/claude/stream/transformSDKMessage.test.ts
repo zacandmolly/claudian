@@ -41,6 +41,29 @@ describe('transformSDKMessage', () => {
       expect(results).toEqual([]);
     });
 
+    it('emits an authoritative blocked tool result for permission denials', () => {
+      const message = {
+        type: 'system',
+        subtype: 'permission_denied',
+        tool_name: 'Bash',
+        tool_use_id: 'tool-123',
+        decision_reason: 'Denied by policy',
+        message: 'The tool was not run.',
+        uuid: 'message-123',
+        session_id: 'test-session',
+      } as any;
+
+      const results = [...transformSDKMessage(message)];
+
+      expect(results).toEqual([{
+        type: 'tool_result',
+        id: 'tool-123',
+        content: 'The tool was not run.',
+        isError: true,
+        isBlocked: true,
+      }]);
+    });
+
     it('yields context_compacted event for compact_boundary subtype', () => {
       const message = msg({
         type: 'system',
@@ -93,11 +116,12 @@ describe('transformSDKMessage', () => {
       });
     });
 
-    it('normalizes task_notification completion into async subagent result', () => {
+    it('normalizes task_notification into a scoped completion event', () => {
       const message = msg({
         type: 'system',
         subtype: 'task_notification',
         task_id: 'agent-123',
+        tool_use_id: 'task-123',
         status: 'completed',
         output_file: '/tmp/agent-123.output',
         summary: 'Agent completed successfully.',
@@ -107,8 +131,10 @@ describe('transformSDKMessage', () => {
 
       expect(results).toEqual([
         {
-          type: 'async_subagent_result',
-          agentId: 'agent-123',
+          type: 'async_subagent_completion',
+          providerSessionId: 'test-session',
+          taskId: 'agent-123',
+          toolUseId: 'task-123',
           status: 'completed',
           result: 'Agent completed successfully.',
         },
@@ -129,8 +155,9 @@ describe('transformSDKMessage', () => {
 
       expect(results).toEqual([
         {
-          type: 'async_subagent_result',
-          agentId: 'agent-failed',
+          type: 'async_subagent_completion',
+          providerSessionId: 'test-session',
+          taskId: 'agent-failed',
           status: 'error',
           result: 'Agent failed.',
         },
@@ -988,9 +1015,85 @@ describe('transformSDKMessage', () => {
             inputTokens: 10,
             cacheCreationInputTokens: 0,
             cacheReadInputTokens: 0,
-            contextWindow: 200000,
+            contextWindow: 1000000,
             contextTokens: 10,
             percentage: 0,
+          },
+        },
+      ]);
+    });
+
+    it('uses an authoritative context window supplied by the SDK runtime', () => {
+      const usageState = createTransformUsageState();
+      const assistantMessage = msg({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: {
+          content: [{ type: 'text', text: 'Hello' }],
+          usage: {
+            input_tokens: 250000,
+            output_tokens: 4,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+        },
+      });
+
+      expect([...transformSDKMessage(assistantMessage, {
+        intendedModel: 'custom-model',
+        authoritativeContextWindow: 1_000_000,
+        usageState,
+      })]).toEqual([
+        { type: 'text', content: 'Hello' },
+        {
+          type: 'usage',
+          usage: {
+            model: 'custom-model',
+            inputTokens: 250000,
+            cacheCreationInputTokens: 0,
+            cacheReadInputTokens: 0,
+            contextWindow: 1_000_000,
+            contextWindowIsAuthoritative: true,
+            contextTokens: 250000,
+            percentage: 25,
+          },
+        },
+      ]);
+    });
+
+    it('prefers an explicit custom-model context limit over the SDK runtime window', () => {
+      const usageState = createTransformUsageState();
+      const assistantMessage = msg({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: {
+          content: [{ type: 'text', text: 'Hello' }],
+          usage: {
+            input_tokens: 250000,
+            output_tokens: 4,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+        },
+      });
+
+      expect([...transformSDKMessage(assistantMessage, {
+        intendedModel: 'custom-model',
+        customContextLimits: { 'custom-model': 1_000_000 },
+        authoritativeContextWindow: 200_000,
+        usageState,
+      })]).toEqual([
+        { type: 'text', content: 'Hello' },
+        {
+          type: 'usage',
+          usage: {
+            model: 'custom-model',
+            inputTokens: 250000,
+            cacheCreationInputTokens: 0,
+            cacheReadInputTokens: 0,
+            contextWindow: 1_000_000,
+            contextTokens: 250000,
+            percentage: 25,
           },
         },
       ]);
@@ -1048,7 +1151,7 @@ describe('transformSDKMessage', () => {
             inputTokens: 10,
             cacheCreationInputTokens: 0,
             cacheReadInputTokens: 0,
-            contextWindow: 200000,
+            contextWindow: 1000000,
             contextTokens: 10,
             percentage: 0,
           },
@@ -1155,8 +1258,8 @@ describe('transformSDKMessage', () => {
       const results = [...transformSDKMessage(message)];
 
       expect(results).toEqual([
-        { type: 'error', content: 'Hit maximum turn limit' },
         { type: 'context_window', contextWindow: 200000 },
+        { type: 'error', content: 'Hit maximum turn limit' },
       ]);
     });
 
@@ -1246,6 +1349,40 @@ describe('transformSDKMessage', () => {
       });
 
       const results = [...transformSDKMessage(message, { intendedModel: 'opus[1m]' })];
+
+      expect(results).toEqual([
+        { type: 'context_window', contextWindow: 1000000 },
+      ]);
+    });
+
+    it('matches fable family against SDK modelUsage keys via a version-profile suffix', () => {
+      const message = msg({
+        type: 'result',
+        modelUsage: {
+          'claude-haiku-4-5-20251001': {
+            inputTokens: 1000,
+            outputTokens: 300,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens: 0,
+            webSearchRequests: 0,
+            costUSD: 0.01,
+            contextWindow: 200000,
+            maxOutputTokens: 32000,
+          },
+          'claude-fable-5-v1:0': {
+            inputTokens: 1000,
+            outputTokens: 300,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens: 0,
+            webSearchRequests: 0,
+            costUSD: 0.01,
+            contextWindow: 1000000,
+            maxOutputTokens: 32000,
+          },
+        },
+      });
+
+      const results = [...transformSDKMessage(message, { intendedModel: 'fable' })];
 
       expect(results).toEqual([
         { type: 'context_window', contextWindow: 1000000 },
@@ -1445,8 +1582,8 @@ describe('transformSDKMessage', () => {
       expect(usage.cacheCreationInputTokens).toBe(300);
       expect(usage.cacheReadInputTokens).toBe(200);
       expect(usage.contextTokens).toBe(1500); // 1000 + 300 + 200
-      expect(usage.contextWindow).toBe(200000); // Standard context window
-      expect(usage.percentage).toBe(1); // 1500 / 200000 * 100 rounded
+      expect(usage.contextWindow).toBe(1000000);
+      expect(usage.percentage).toBe(0); // 1500 / 1000000 * 100 rounded
     });
 
     it('yields usage from assistant message when usage state has no stream prompt usage', () => {
@@ -1477,9 +1614,9 @@ describe('transformSDKMessage', () => {
         inputTokens: 1000,
         cacheCreationInputTokens: 300,
         cacheReadInputTokens: 200,
-        contextWindow: 200000,
+        contextWindow: 1000000,
         contextTokens: 1500,
-        percentage: 1,
+        percentage: 0,
       });
     });
 
@@ -1625,7 +1762,7 @@ describe('transformSDKMessage', () => {
             inputTokens: 0,
             cacheCreationInputTokens: 0,
             cacheReadInputTokens: 0,
-            contextWindow: 200000,
+            contextWindow: 1000000,
             contextTokens: 0,
             percentage: 0,
           },

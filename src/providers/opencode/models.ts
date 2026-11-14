@@ -1,3 +1,9 @@
+import {
+  DEFAULT_REASONING_VALUE,
+  formatReasoningValueLabel,
+  resolvePreferredReasoningDefault,
+} from '../../core/providers/reasoning';
+
 export interface OpencodeDiscoveredModel {
   description?: string;
   label: string;
@@ -25,7 +31,6 @@ export interface OpencodeDiscoveredModelGroup {
   providerLabel: string;
 }
 
-export const OPENCODE_SYNTHETIC_MODEL_ID = 'opencode';
 export const OPENCODE_DEFAULT_THINKING_LEVEL = 'default';
 
 const OPENCODE_MODEL_PREFIX = 'opencode:';
@@ -42,13 +47,26 @@ const OPENCODE_VARIANT_ASCENDING_RANK = new Map<string, number>(
   OPENCODE_VARIANT_ASCENDING_ORDER.map((value, index) => [value, index] as const),
 );
 
+export function resolveOpencodeDefaultThinkingLevel(
+  options: OpencodeModelVariant[],
+  preferredValue?: string,
+  fallbackValue: string = DEFAULT_REASONING_VALUE,
+): string {
+  const values = options.map(option => option.value);
+  if (preferredValue && (values.length === 0 || values.includes(preferredValue))) {
+    return preferredValue;
+  }
+
+  return resolvePreferredReasoningDefault(values, fallbackValue);
+}
+
 export function isOpencodeModelSelectionId(model: string): boolean {
-  return model === OPENCODE_SYNTHETIC_MODEL_ID || model.startsWith(OPENCODE_MODEL_PREFIX);
+  return decodeOpencodeModelId(model) !== null;
 }
 
 export function encodeOpencodeModelId(rawModelId: string): string {
   const normalized = rawModelId.trim();
-  return normalized ? `${OPENCODE_MODEL_PREFIX}${normalized}` : OPENCODE_SYNTHETIC_MODEL_ID;
+  return normalized ? `${OPENCODE_MODEL_PREFIX}${normalized}` : '';
 }
 
 export function decodeOpencodeModelId(model: string): string | null {
@@ -123,7 +141,7 @@ export function normalizeOpencodeModelVariants(value: unknown): OpencodeModelVar
 
     variants.push({
       ...(description ? { description } : {}),
-      label: rawLabel || formatOpencodeThinkingLevelLabel(rawValue),
+      label: rawLabel || formatReasoningValueLabel(rawValue),
       value: rawValue,
     });
   }
@@ -273,7 +291,7 @@ export function buildOpencodeBaseModels(
 
         return [{
           ...(entry.description ? { description: entry.description } : {}),
-          label: formatOpencodeThinkingLevelLabel(variant),
+          label: formatReasoningValueLabel(variant),
           value: variant,
         }];
       });
@@ -295,19 +313,6 @@ export function getOpencodeModelVariants(
   const baseRawId = resolveOpencodeBaseModelRawId(rawId, models);
   return buildOpencodeBaseModels(models)
     .find((model) => model.rawId === baseRawId)?.variants ?? [];
-}
-
-function formatOpencodeThinkingLevelLabel(value: string): string {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return '';
-  }
-
-  if (trimmed.toLowerCase() === 'xhigh') {
-    return 'XHigh';
-  }
-
-  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
 }
 
 export function groupOpencodeDiscoveredModels(

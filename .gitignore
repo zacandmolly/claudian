@@ -5,6 +5,8 @@ styles.css
 *.js.map
 dist/
 build/
+!tests/integration/build/
+!tests/integration/build/*.test.ts
 
 # Dependencies
 node_modules/
@@ -86,6 +88,8 @@ test-results/
 # Development files
 sandbox/
 dev
+.context/
+CLAUDE.local.md
 
 # Lock files (uncomment based on package manager)
 # yarn.lock

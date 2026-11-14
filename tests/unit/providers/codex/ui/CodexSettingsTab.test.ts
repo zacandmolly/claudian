@@ -1,16 +1,31 @@
 import * as fs from 'fs';
 
+import { ProviderExecutionLifecycleRegistry } from '@/core/execution';
+import { ProviderSettingsCoordinator } from '@/core/providers/ProviderSettingsCoordinator';
 import { DEFAULT_CODEX_PROVIDER_SETTINGS } from '@/providers/codex/settings';
 import { codexSettingsTabRenderer } from '@/providers/codex/ui/CodexSettingsTab';
 
 const mockGetHostnameKey = jest.fn(() => 'host-a');
 const mockRenderEnvironmentSettingsSection = jest.fn();
 const mockSaveSettings = jest.fn().mockResolvedValue(undefined);
-const mockBroadcastToAllTabs = jest.fn().mockResolvedValue(undefined);
+const mockCodexCliResolverReset = jest.fn();
+const mockRefreshCodexModelPicker = jest.fn();
+const mockRenderCodexModelPicker = jest.fn((
+  _container: unknown,
+  _context: { notifyProviderModelOptionsChanged: (providerId: string) => void },
+  _workspace: unknown,
+) => ({ refresh: mockRefreshCodexModelPicker }));
+const mockRefreshModelCatalog = jest.fn().mockResolvedValue({ changed: false });
 
 jest.mock('fs');
 jest.mock('@/core/providers/ProviderSettingsCoordinator', () => ({
   ProviderSettingsCoordinator: {
+    canApplyProviderEnablement: jest.fn(() => true),
+    applyProviderEnablement: jest.fn((settings: Record<string, unknown>, _providerId: string, enabled: boolean) => {
+      const providerConfigs = settings.providerConfigs as { codex: { enabled: boolean } };
+      providerConfigs.codex.enabled = enabled;
+      return true;
+    }),
     reconcileTitleGenerationModelSelection: jest.fn((settings: Record<string, unknown>) => {
       const titleGenerationModel = settings.titleGenerationModel;
       const customModels = (
@@ -22,6 +37,7 @@ jest.mock('@/core/providers/ProviderSettingsCoordinator', () => ({
       }
       return false;
     }),
+    normalizeAllModelVariants: jest.fn(),
   },
 }));
 jest.mock('obsidian', () => {
@@ -93,7 +109,7 @@ jest.mock('obsidian', () => {
   };
 });
 
-jest.mock('@/features/settings/ui/EnvironmentSettingsSection', () => ({
+jest.mock('@/shared/settings/EnvironmentSettingsSection', () => ({
   renderEnvironmentSettingsSection: (...args: unknown[]) => mockRenderEnvironmentSettingsSection(...args),
 }));
 
@@ -102,19 +118,21 @@ jest.mock('@/providers/codex/app/CodexWorkspaceServices', () => ({
     commandCatalog: null,
     subagentStorage: {},
     refreshAgentMentions: jest.fn(),
+    refreshModelCatalog: mockRefreshModelCatalog,
+    cliResolver: { reset: mockCodexCliResolverReset },
   })),
 }));
 
-jest.mock('@/providers/codex/ui/CodexSkillSettings', () => ({
-  CodexSkillSettings: jest.fn(),
+jest.mock('@/providers/codex/ui/CodexModelPicker', () => ({
+  renderCodexModelPicker: (
+    container: unknown,
+    context: { notifyProviderModelOptionsChanged: (providerId: string) => void },
+    workspace: unknown,
+  ) => mockRenderCodexModelPicker(container, context, workspace),
 }));
 
 jest.mock('@/providers/codex/ui/CodexSubagentSettings', () => ({
   CodexSubagentSettings: jest.fn(),
-}));
-
-jest.mock('@/i18n/i18n', () => ({
-  t: (key: string) => key,
 }));
 
 jest.mock('@/utils/env', () => ({
@@ -321,7 +339,7 @@ function createContainer(): any {
 }
 
 function createPlugin(overrides: Record<string, unknown> = {}): any {
-  return {
+  const plugin: any = {
     settings: {
       settingsProvider: 'codex',
       model: 'my-custom-model',
@@ -331,16 +349,26 @@ function createPlugin(overrides: Record<string, unknown> = {}): any {
           ...DEFAULT_CODEX_PROVIDER_SETTINGS,
           enabled: true,
           customModels: 'my-custom-model',
+          discoveredModels: [{
+            model: 'gpt-5.6-sol',
+            displayName: 'GPT-5.6-Sol',
+            description: 'Latest frontier agentic coding model.',
+            supportedReasoningEfforts: [{ value: 'low', description: 'Fast' }],
+            defaultReasoningEffort: 'low',
+            serviceTiers: [],
+            defaultServiceTier: null,
+            inputModalities: ['text', 'image'],
+            isDefault: true,
+          }],
         },
       },
       ...overrides,
     },
     saveSettings: mockSaveSettings,
-    getView: jest.fn(() => ({
-      getTabManager: jest.fn(() => ({
-        broadcastToAllTabs: mockBroadcastToAllTabs,
-      })),
-    })),
+    runProviderExecutionTransition: jest.fn(async (
+      _providerIds: string[],
+      mutation: () => Promise<unknown>,
+    ) => mutation()),
     app: {
       vault: {
         adapter: {
@@ -349,15 +377,53 @@ function createPlugin(overrides: Record<string, unknown> = {}): any {
       },
     },
   };
+  plugin.mutateSettings = jest.fn(async (mutation: (settings: any) => void | Promise<void>) => {
+    await mutation(plugin.settings);
+    await plugin.saveSettings();
+  });
+  plugin.applyProviderRuntimeSettings = jest.fn(async (
+    providerIds: string[],
+    mutation: (settings: any) => void | Promise<void>,
+    onApplied?: () => void | Promise<void>,
+  ) => plugin.runProviderExecutionTransition(providerIds, async () => {
+    await plugin.mutateSettings(mutation);
+    await onApplied?.();
+  }));
+  return plugin;
 }
 
 function createContext(plugin: any) {
   return {
     plugin,
+    renderAgentSkillSettings: jest.fn(),
     renderHiddenProviderCommandSetting: jest.fn(),
-    refreshModelSelectors: jest.fn(),
+    notifyProviderModelOptionsChanged: jest.fn(),
     renderCustomContextLimits: jest.fn(),
   };
+}
+
+function acquireSettingsLease(
+  registry: ProviderExecutionLifecycleRegistry,
+): jest.Mock {
+  const dispose = jest.fn().mockResolvedValue(undefined);
+  registry.acquire({
+    providerId: 'codex',
+    createSession: () => ({
+      providerId: 'codex',
+      sessionInstanceId: 'codex-settings-session',
+      execute: jest.fn(),
+      cancel: jest.fn(),
+      getSnapshot: jest.fn().mockReturnValue({
+        providerId: 'codex',
+        revision: 0,
+        status: 'idle',
+      }),
+      getStatus: jest.fn().mockReturnValue('idle'),
+      onEvent: jest.fn().mockReturnValue(() => undefined),
+      dispose,
+    }),
+  } as any, {} as any, 'chat');
+  return dispose;
 }
 
 function findSetting(name: string) {
@@ -408,6 +474,192 @@ describe('CodexSettingsTab', () => {
     expect(findOptionalSetting('WSL distro override')).toBeUndefined();
   });
 
+  it('renders Models before Safety', () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+
+    codexSettingsTabRenderer.render(createContainer(), createContext(createPlugin()));
+
+    const headings = createdSettings.filter(setting => setting.heading).map(setting => setting.name);
+    expect(headings.indexOf('Models')).toBeLessThan(headings.indexOf('Safety'));
+  });
+
+  it('renders a default-off ultra effort toggle and publishes changes to chat consumers', async () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    const plugin = createPlugin();
+    const context = createContext(plugin);
+
+    codexSettingsTabRenderer.render(createContainer(), context);
+
+    const setting = findSetting('Enable ultra effort');
+    const toggle = setting.toggleComponents[0];
+    expect(toggle.value).toBe(false);
+
+    await toggle.onChangeCallback?.(true);
+
+    expect(plugin.settings.providerConfigs.codex.enableUltraEffort).toBe(true);
+    expect(ProviderSettingsCoordinator.normalizeAllModelVariants).toHaveBeenCalledWith(
+      plugin.settings,
+    );
+    expect(mockRefreshCodexModelPicker).toHaveBeenCalledTimes(1);
+    expect(context.notifyProviderModelOptionsChanged).toHaveBeenCalledWith('codex');
+  });
+
+  it('refreshes title model options after Codex enablement changes', async () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    const plugin = createPlugin();
+    const context = createContext(plugin);
+
+    codexSettingsTabRenderer.render(createContainer(), context);
+    const enableSetting = findSetting('Enable Codex');
+    expect(enableSetting.desc).toBe(
+      'Make enabled Codex models available for new conversations. Existing sessions are preserved when disabled.',
+    );
+    await enableSetting.toggleComponents[0].onChangeCallback?.(false);
+
+    expect(context.notifyProviderModelOptionsChanged).toHaveBeenCalledWith('codex');
+  });
+
+  it('commits enablement inside the Codex transition without launching metadata discovery', async () => {
+    const registry = new ProviderExecutionLifecycleRegistry();
+    const dispose = acquireSettingsLease(registry);
+    const plugin = createPlugin({
+      providerConfigs: {
+        codex: {
+          ...DEFAULT_CODEX_PROVIDER_SETTINGS,
+          enabled: false,
+        },
+      },
+    });
+    let transitionActive = false;
+    plugin.runProviderExecutionTransition.mockImplementation(async (
+      providerIds: string[],
+      mutation: () => Promise<unknown>,
+    ) => registry.runTransition(providerIds as ['codex'], async () => {
+      transitionActive = true;
+      try {
+        return await mutation();
+      } finally {
+        transitionActive = false;
+      }
+    }));
+    plugin.mutateSettings.mockImplementation(async (
+      mutation: (settings: Record<string, unknown>) => void | Promise<void>,
+    ) => {
+      expect(transitionActive).toBe(true);
+      await mutation(plugin.settings);
+      await plugin.saveSettings();
+    });
+    const context = createContext(plugin);
+
+    codexSettingsTabRenderer.render(createContainer(), context);
+    const toggle = findSetting('Enable Codex').toggleComponents[0];
+    await toggle.onChangeCallback?.(true);
+
+    expect(plugin.runProviderExecutionTransition).toHaveBeenCalledWith(
+      ['codex'],
+      expect.any(Function),
+    );
+    expect(plugin.settings.providerConfigs.codex.enabled).toBe(true);
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(registry.getProviderGeneration('codex')).toBe(1);
+    expect(mockRefreshModelCatalog).not.toHaveBeenCalled();
+    expect(context.notifyProviderModelOptionsChanged).toHaveBeenCalledWith('codex');
+    await registry.dispose();
+  });
+
+  it.each([
+    ['before mutation', false],
+    ['after mutation', true],
+  ] as const)(
+    'resynchronizes the enable toggle when the transition fails %s',
+    async (_phase, mutateBeforeFailure) => {
+      const plugin = createPlugin();
+      plugin.runProviderExecutionTransition.mockImplementation(async (
+        _providerIds: string[],
+        mutation: () => Promise<unknown>,
+      ) => {
+        if (mutateBeforeFailure) await mutation();
+        throw new Error('enablement transition failed');
+      });
+      const context = createContext(plugin);
+
+      codexSettingsTabRenderer.render(createContainer(), context);
+      const toggle = findSetting('Enable Codex').toggleComponents[0];
+      toggle.value = false;
+      toggle.setValue.mockClear();
+
+      await expect(toggle.onChangeCallback?.(false)).rejects.toThrow(
+        'enablement transition failed',
+      );
+
+      const persistedEnabled = plugin.settings.providerConfigs.codex.enabled;
+      expect(persistedEnabled).toBe(mutateBeforeFailure ? false : true);
+      expect(toggle.setValue).toHaveBeenCalledWith(persistedEnabled);
+      expect(context.notifyProviderModelOptionsChanged).not.toHaveBeenCalled();
+    },
+  );
+
+  it('renders the app-server model visibility picker', () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    const plugin = createPlugin();
+    const context = createContext(plugin);
+    const container = createContainer();
+
+    codexSettingsTabRenderer.render(container, context);
+
+    expect(mockRenderCodexModelPicker).toHaveBeenCalledWith(
+      container,
+      expect.objectContaining({ plugin }),
+      expect.objectContaining({ commandCatalog: null }),
+    );
+  });
+
+  it('warns when Codex is enabled without any enabled models', () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    const plugin = createPlugin({
+      providerConfigs: {
+        codex: {
+          ...DEFAULT_CODEX_PROVIDER_SETTINGS,
+          enabled: true,
+          visibleModels: [],
+        },
+      },
+    });
+    const context = createContext(plugin);
+    const container = createContainer();
+
+    codexSettingsTabRenderer.render(container, context);
+
+    const warningCallIndex = container.createDiv.mock.calls.findIndex(
+      ([options]: [{ text?: string }?]) => options?.text
+        === 'No Codex models are enabled. Go to Models below and enable at least one model.',
+    );
+    const warningEl = container.createDiv.mock.results[warningCallIndex]?.value;
+    expect(warningCallIndex).toBeGreaterThanOrEqual(0);
+    expect(warningEl.toggleClass).toHaveBeenLastCalledWith('claudian-hidden', false);
+
+    plugin.settings.providerConfigs.codex.customModels = 'gpt-custom';
+    const pickerContext = mockRenderCodexModelPicker.mock.calls[0][1];
+    pickerContext.notifyProviderModelOptionsChanged('codex');
+
+    expect(context.notifyProviderModelOptionsChanged).toHaveBeenCalledWith('codex');
+    expect(warningEl.toggleClass).toHaveBeenLastCalledWith('claudian-hidden', true);
+  });
+
+  it('renders the fixed-root shared skill manager', () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    const plugin = createPlugin();
+    const context = createContext(plugin);
+    const container = createContainer();
+
+    codexSettingsTabRenderer.render(container, context);
+
+    expect(context.renderAgentSkillSettings).toHaveBeenCalledWith(
+      container,
+      'codex',
+    );
+  });
+
   it('uses host-native CLI path behavior on non-Windows even when WSL is saved', async () => {
     Object.defineProperty(process, 'platform', { value: 'darwin' });
     const plugin = createPlugin({
@@ -435,19 +687,58 @@ describe('CodexSettingsTab', () => {
     codexSettingsTabRenderer.render(createContainer(), createContext(plugin));
 
     const cliPathSetting = findSetting('Codex CLI path');
-    expect(cliPathSetting.desc).toBe('Custom path to the local Codex CLI. Leave empty for auto-detection from PATH.');
+    expect(cliPathSetting.desc).toBe('Custom path to the local Codex CLI. Leave empty to prefer known Codex installs, then PATH.');
     expect(cliPathSetting.textComponents[0].placeholder).toBe('/usr/local/bin/codex');
 
     await cliPathSetting.textComponents[0].onChangeCallback?.('codex');
 
     expect(plugin.settings.providerConfigs.codex.cliPathsByHost['host-a']).toBeUndefined();
     expect(mockSaveSettings).toHaveBeenCalledTimes(0);
-    expect(mockBroadcastToAllTabs).toHaveBeenCalledTimes(0);
+  });
+
+  it('accepts a CLI path pasted with surrounding quotes', async () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    mockedExistsSync.mockImplementation((filePath: fs.PathLike) => String(filePath) === '/my tools/codex');
+    const plugin = createPlugin();
+    plugin.runProviderExecutionTransition.mockImplementation(async (
+      _providerIds: string[],
+      mutation: () => Promise<unknown>,
+    ) => mutation());
+    plugin.mutateSettings.mockImplementation(async (
+      mutation: (settings: any) => void | Promise<void>,
+    ) => {
+      await mutation(plugin.settings);
+      await plugin.saveSettings();
+    });
+
+    codexSettingsTabRenderer.render(createContainer(), createContext(plugin));
+    await findSetting('Codex CLI path').textComponents[0].onChangeCallback?.('"/my tools/codex"');
+
+    expect(plugin.settings.providerConfigs.codex.cliPathsByHost['host-a']).toBe('"/my tools/codex"');
   });
 
   it('accepts a Linux-side CLI command when installation method is WSL', async () => {
     Object.defineProperty(process, 'platform', { value: 'win32' });
     const plugin = createPlugin();
+    let transitionActive = false;
+    plugin.runProviderExecutionTransition.mockImplementation(async (
+      _providerIds: string[],
+      mutation: () => Promise<unknown>,
+    ) => {
+      transitionActive = true;
+      try {
+        return await mutation();
+      } finally {
+        transitionActive = false;
+      }
+    });
+    plugin.mutateSettings.mockImplementation(async (
+      mutation: (settings: Record<string, unknown>) => void | Promise<void>,
+    ) => {
+      expect(transitionActive).toBe(true);
+      await mutation(plugin.settings);
+      await plugin.saveSettings();
+    });
 
     codexSettingsTabRenderer.render(createContainer(), createContext(plugin));
 
@@ -462,7 +753,32 @@ describe('CodexSettingsTab', () => {
     });
     expect(plugin.settings.providerConfigs.codex.cliPathsByHost['host-a']).toBe('codex');
     expect(mockSaveSettings).toHaveBeenCalled();
-    expect(mockBroadcastToAllTabs).toHaveBeenCalled();
+    expect(plugin.runProviderExecutionTransition).toHaveBeenCalledWith(
+      ['codex'],
+      expect.any(Function),
+    );
+    expect(plugin.applyProviderRuntimeSettings).toHaveBeenCalledTimes(2);
+    expect(mockCodexCliResolverReset).toHaveBeenCalledTimes(2);
+    expect(mockRefreshModelCatalog).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts a quoted Linux-side CLI path when installation method is WSL', async () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    const plugin = createPlugin();
+
+    codexSettingsTabRenderer.render(createContainer(), createContext(plugin));
+
+    const installationMethodSetting = findSetting('Installation method');
+    await installationMethodSetting.dropdownComponents[0].onChangeCallback?.('wsl');
+    mockSaveSettings.mockClear();
+
+    const cliPathSetting = findSetting('Codex CLI path');
+    await cliPathSetting.textComponents[0].onChangeCallback?.('"/home/user/my tools/codex"');
+
+    expect(plugin.settings.providerConfigs.codex.cliPathsByHost['host-a']).toBe(
+      '"/home/user/my tools/codex"',
+    );
+    expect(mockSaveSettings).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a Windows-native CLI path when installation method is WSL', async () => {
@@ -493,86 +809,48 @@ describe('CodexSettingsTab', () => {
     expect(plugin.settings.providerConfigs.codex.cliPathsByHost['host-a']).toBe(
       'C:\\Users\\me\\AppData\\Roaming\\npm\\codex.exe',
     );
-    expect(mockBroadcastToAllTabs).toHaveBeenCalledTimes(0);
   });
 
-  it('does not switch the active model while the custom models textarea is mid-edit', async () => {
-    Object.defineProperty(process, 'platform', { value: 'darwin' });
+  it('rejects a quoted Windows-native CLI path when installation method is WSL', async () => {
+    Object.defineProperty(process, 'platform', { value: 'win32' });
     const plugin = createPlugin();
-    const context = createContext(plugin);
+    const container = createContainer();
 
-    codexSettingsTabRenderer.render(createContainer(), context);
+    codexSettingsTabRenderer.render(container, createContext(plugin));
 
-    const customModelsSetting = findSetting('Custom models');
-    const customModelsTextArea = customModelsSetting.textAreaComponents[0];
+    const installationMethodSetting = findSetting('Installation method');
+    await installationMethodSetting.dropdownComponents[0].onChangeCallback?.('wsl');
+    mockSaveSettings.mockClear();
 
-    await customModelsTextArea.onChangeCallback?.('different-custom-model');
+    const cliPathSetting = findSetting('Codex CLI path');
+    await cliPathSetting.textComponents[0].onChangeCallback?.(
+      '"C:\\Users\\me\\AppData\\Roaming\\npm\\codex.exe"',
+    );
 
-    expect(plugin.settings.providerConfigs.codex.customModels).toBe('my-custom-model');
-    expect(plugin.settings.model).toBe('my-custom-model');
+    expect(plugin.settings.providerConfigs.codex.cliPathsByHost['host-a']).toBeUndefined();
     expect(mockSaveSettings).not.toHaveBeenCalled();
-    expect(context.refreshModelSelectors).not.toHaveBeenCalled();
+
+    const validationCallIndex = container.createDiv.mock.calls.findIndex(
+      ([options]: [{ cls?: string }?]) => options?.cls?.includes('claudian-cli-path-validation'),
+    );
+    const validationEl = container.createDiv.mock.results[validationCallIndex]?.value;
+    expect(validationCallIndex).toBeGreaterThanOrEqual(0);
+    expect(validationEl.setText).toHaveBeenLastCalledWith(
+      'WSL mode expects a Linux command or Linux absolute path, not a Windows executable path.',
+    );
+    expect(validationEl.hasClass('claudian-hidden')).toBe(false);
+    expect(cliPathSetting.textComponents[0].inputEl.toggleClass).toHaveBeenLastCalledWith(
+      'claudian-input-error',
+      true,
+    );
   });
 
-  it('shows current Codex custom model examples in the custom models textarea', () => {
+  it('does not render the legacy custom models textarea', () => {
     Object.defineProperty(process, 'platform', { value: 'darwin' });
     const plugin = createPlugin();
 
     codexSettingsTabRenderer.render(createContainer(), createContext(plugin));
 
-    const customModelsSetting = findSetting('Custom models');
-    expect(customModelsSetting.textAreaComponents[0].placeholder).toBe(
-      'gpt-5.4\ngpt-5.3-codex-spark',
-    );
-  });
-
-  it('reconciles removed custom models on blur and clears stale title model selections', async () => {
-    Object.defineProperty(process, 'platform', { value: 'darwin' });
-    const plugin = createPlugin({
-      titleGenerationModel: 'my-custom-model',
-    });
-    const context = createContext(plugin);
-
-    codexSettingsTabRenderer.render(createContainer(), context);
-
-    const customModelsSetting = findSetting('Custom models');
-    const customModelsTextArea = customModelsSetting.textAreaComponents[0];
-
-    await customModelsTextArea.onChangeCallback?.('different-custom-model');
-    await customModelsTextArea.trigger('blur');
-
-    expect(plugin.settings.providerConfigs.codex.customModels).toBe('different-custom-model');
-    expect(plugin.settings.model).toBe('gpt-5.4-mini');
-    expect(plugin.settings.titleGenerationModel).toBe('');
-    expect(mockSaveSettings).toHaveBeenCalledTimes(1);
-    expect(context.refreshModelSelectors).toHaveBeenCalledTimes(1);
-  });
-
-  it('reconciles an inactive Codex saved model when a removed custom model was selected', async () => {
-    Object.defineProperty(process, 'platform', { value: 'darwin' });
-    const plugin = createPlugin({
-      settingsProvider: 'claude',
-      model: 'haiku',
-      savedProviderModel: {
-        claude: 'haiku',
-        codex: 'my-custom-model',
-      },
-    });
-    const context = createContext(plugin);
-
-    codexSettingsTabRenderer.render(createContainer(), context);
-
-    const customModelsSetting = findSetting('Custom models');
-    const customModelsTextArea = customModelsSetting.textAreaComponents[0];
-
-    await customModelsTextArea.onChangeCallback?.('different-custom-model');
-    await customModelsTextArea.trigger('blur');
-
-    expect(plugin.settings.model).toBe('haiku');
-    expect(plugin.settings.savedProviderModel).toEqual({
-      claude: 'haiku',
-      codex: 'gpt-5.4-mini',
-    });
-    expect(mockSaveSettings).toHaveBeenCalledTimes(1);
+    expect(createdSettings.some(setting => setting.name === 'Custom models')).toBe(false);
   });
 });
