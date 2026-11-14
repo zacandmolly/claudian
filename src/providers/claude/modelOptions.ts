@@ -90,25 +90,34 @@ function normalizeCustomModelAliases(value: unknown): Record<string, string> {
 
 export function getClaudeModelOptions(settings: Record<string, unknown>): ClaudeModelOption[] {
   const customModelAliases = normalizeCustomModelAliases(settings.customModelAliases);
-  const customModels = getModelsFromEnvironment(
+  const environmentModels = getModelsFromEnvironment(
     getRuntimeEnvironmentVariables(settings, 'claude'),
     customModelAliases,
   );
-  if (customModels.length > 0) {
-    return customModels.map((model) => withModelMenuMetadata({
-      ...model,
-      value: encodeClaudeModelSelectionId(model.value),
-    }));
-  }
-
   const claudeSettings = getClaudeProviderSettings(settings);
-  const models: ClaudeModelOption[] = claudeSettings.showDefaultModels
-    ? [...DEFAULT_CLAUDE_MODELS]
-    : [];
+  // Environment slots replace the built-in tier list. They do not replace a
+  // configured custom-model menu: that menu is the user's selectable catalog.
+  const models: ClaudeModelOption[] = environmentModels.length > 0
+    ? []
+    : (claudeSettings.showDefaultModels ? [...DEFAULT_CLAUDE_MODELS] : []);
 
   const seenModelIds = new Set(models.map(model =>
     normalizeLegacyClaudeModelAlias(toClaudeRuntimeModelId(model.value))
   ));
+
+  for (const environmentModel of environmentModels) {
+    const modelId = toClaudeRuntimeModelId(environmentModel.value);
+    const normalizedModelId = normalizeLegacyClaudeModelAlias(modelId);
+    if (seenModelIds.has(normalizedModelId)) {
+      continue;
+    }
+    seenModelIds.add(normalizedModelId);
+    models.push(withModelMenuMetadata({
+      ...environmentModel,
+      value: encodeClaudeModelSelectionId(modelId),
+    }));
+  }
+
   for (const configuredModelId of parseConfiguredCustomModelIds(claudeSettings.customModels)) {
     const modelId = toClaudeRuntimeModelId(configuredModelId);
     const normalizedModelId = normalizeLegacyClaudeModelAlias(modelId);

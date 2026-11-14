@@ -138,8 +138,18 @@ export function getCodexModelOptions(settings: Record<string, unknown>): Provide
     });
   }
 
+  const allowsModel = (modelId: string): boolean => {
+    if (codexSettings.visibleModels === null) {
+      return true;
+    }
+    const runtimeModelId = toCodexRuntimeModelId(modelId);
+    return codexSettings.visibleModels.some(entry =>
+      entry === modelId || toCodexRuntimeModelId(entry) === runtimeModelId
+    );
+  };
+
   const envModel = getConfiguredEnvCustomModel(settings);
-  if (envModel) {
+  if (envModel && allowsModel(envModel)) {
     const runtimeModelId = toCodexRuntimeModelId(envModel);
     const existingIndex = models.findIndex(option =>
       toCodexRuntimeModelId(option.value) === runtimeModelId
@@ -153,7 +163,7 @@ export function getCodexModelOptions(settings: Record<string, unknown>): Provide
 
   for (const configuredModelId of parseConfiguredCustomModelIds(codexSettings.customModels)) {
     const modelId = toCodexRuntimeModelId(configuredModelId);
-    if (seenModelIds.has(modelId)) {
+    if (seenModelIds.has(modelId) || !allowsModel(modelId)) {
       continue;
     }
 

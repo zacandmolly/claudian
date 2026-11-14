@@ -643,6 +643,11 @@ describe('CodexSettingsTab', () => {
     pickerContext.notifyProviderModelOptionsChanged('codex');
 
     expect(context.notifyProviderModelOptionsChanged).toHaveBeenCalledWith('codex');
+    expect(warningEl.toggleClass).toHaveBeenLastCalledWith('claudian-hidden', false);
+
+    plugin.settings.providerConfigs.codex.visibleModels = ['gpt-custom'];
+    pickerContext.notifyProviderModelOptionsChanged('codex');
+
     expect(warningEl.toggleClass).toHaveBeenLastCalledWith('claudian-hidden', true);
   });
 
