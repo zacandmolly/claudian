@@ -31,6 +31,7 @@ describe('RetirementAcknowledgementWorker', () => {
       }),
     };
     const worker = new RetirementAcknowledgementWorker(store, client, {
+      now: () => new Date(ACKNOWLEDGED_AT),
       projectRecoveryAdmission,
     });
 
@@ -74,6 +75,7 @@ describe('RetirementAcknowledgementWorker', () => {
         }),
     };
     const worker = new RetirementAcknowledgementWorker(store, client, {
+      now: () => new Date(ACKNOWLEDGED_AT),
       projectRecoveryAdmission: admitProjectRecovery,
       scheduleRetry: retry,
     });
@@ -98,6 +100,7 @@ describe('RetirementAcknowledgementWorker', () => {
       }),
     };
     const worker = new RetirementAcknowledgementWorker(store, client, {
+      now: () => new Date(ACKNOWLEDGED_AT),
       projectRecoveryAdmission: admitProjectRecovery,
       scheduleRetry,
     });
