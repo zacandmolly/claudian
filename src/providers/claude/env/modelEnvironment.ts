@@ -55,10 +55,57 @@ function isClaudeSnippet(snippet: EnvSnippet): boolean {
   return !snippet.scope || snippet.scope === 'provider:claude';
 }
 
-function findRouteSnippet(
+interface ClaudeRouteSettings {
+  envSnippets?: EnvSnippet[];
+  claudeModelRoutes?: unknown;
+}
+
+function readClaudeModelRoutes(value: unknown): Map<string, string> {
+  const routes = new Map<string, string>();
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return routes;
+  }
+  for (const [modelId, snippetId] of Object.entries(value)) {
+    if (typeof snippetId !== 'string') {
+      continue;
+    }
+    const model = modelId.trim();
+    const snippet = snippetId.trim();
+    if (!model || !snippet) {
+      continue;
+    }
+    routes.set(normalizeModelId(model), snippet);
+    routes.set(model, snippet);
+  }
+  return routes;
+}
+
+function findExplicitRouteSnippet(
   snippets: readonly EnvSnippet[],
+  routes: Map<string, string>,
   model: string,
 ): EnvSnippet | null {
+  const snippetId = routes.get(normalizeModelId(model))
+    ?? routes.get(toClaudeRuntimeModelId(model).trim());
+  if (!snippetId) {
+    return null;
+  }
+  return snippets.find(snippet => isClaudeSnippet(snippet) && snippet.id === snippetId) ?? null;
+}
+
+function findRouteSnippet(
+  settings: ClaudeRouteSettings,
+  model: string,
+): EnvSnippet | null {
+  const snippets = settings.envSnippets ?? [];
+  const explicit = findExplicitRouteSnippet(
+    snippets,
+    readClaudeModelRoutes(settings.claudeModelRoutes),
+    model,
+  );
+  if (explicit) {
+    return explicit;
+  }
   if (isDeepSeekClaudeModel(model)) {
     return snippets.find(snippet => isClaudeSnippet(snippet) && (
       snippet.id === 'claude-deepseek-v4'
@@ -134,12 +181,19 @@ export interface ClaudeModelEnvironmentResolution {
   readonly routeSnippetId?: string;
 }
 
+export function resolveClaudeRouteSnippet(
+  settings: ClaudeRouteSettings,
+  model: string,
+): EnvSnippet | null {
+  return findRouteSnippet(settings, model);
+}
+
 export function resolveClaudeModelEnvironment(
-  settings: { envSnippets?: EnvSnippet[] },
+  settings: ClaudeRouteSettings,
   baseEnvironmentText: string,
   selectedModel: string,
 ): ClaudeModelEnvironmentResolution {
-  const routeSnippet = findRouteSnippet(settings.envSnippets ?? [], selectedModel);
+  const routeSnippet = findRouteSnippet(settings, selectedModel);
   const kimiEnvironment = getKimiEnvironment(selectedModel);
   const environmentText = joinEnvironmentTexts(
     baseEnvironmentText,
@@ -154,6 +208,9 @@ export function resolveClaudeModelEnvironment(
     },
     selectedModel,
   );
+  if (routeSnippet && !isKimiClaudeModel(selectedModel)) {
+    environment.ANTHROPIC_MODEL = normalizeClaudeRuntimeModelId(selectedModel);
+  }
   const usesModelScopedEnvironment = usesModelScopedClaudeEnvironment(selectedModel);
   const fingerprint = createRuntimeInputFingerprint({
     additionalInputs: {

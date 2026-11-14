@@ -7,6 +7,7 @@ import type {
 } from '../../../core/providers/types';
 import { CLAUDE_PROVIDER_ICON } from '../../../shared/icons';
 import { getCustomModelIds } from '../env/claudeModelEnv';
+import { resolveClaudeRouteSnippet } from '../env/modelEnvironment';
 import {
   findClaudeModelOption,
   getClaudeModelMenuOptions,
@@ -74,8 +75,19 @@ export const claudeChatUIConfig: ProviderChatUIConfig = {
     return DEFAULT_EFFORT_LEVEL[toClaudeRuntimeModelId(model)] ?? DEFAULT_REASONING_VALUE;
   },
 
-  getContextWindowSize(model: string, customLimits?: Record<string, number>): number {
-    return getContextWindowSize(toClaudeRuntimeModelId(model), customLimits);
+  getContextWindowSize(
+    model: string,
+    customLimits?: Record<string, number>,
+    settings?: Record<string, unknown>,
+  ): number {
+    const runtimeModel = toClaudeRuntimeModelId(model);
+    const routeLimits = settings
+      ? resolveClaudeRouteSnippet(settings, runtimeModel)?.contextLimits
+      : undefined;
+    return getContextWindowSize(runtimeModel, {
+      ...(routeLimits ?? {}),
+      ...(customLimits ?? {}),
+    });
   },
 
   isDefaultModel(model: string): boolean {

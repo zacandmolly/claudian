@@ -181,7 +181,7 @@ describe('claudeChatUIConfig', () => {
       });
     });
 
-    it('keeps environment-defined custom models as a full override', () => {
+    it('keeps configured custom models beside environment-projected models', () => {
       const options = claudeChatUIConfig.getModelOptions({
         providerConfigs: {
           claude: {
@@ -197,6 +197,12 @@ describe('claudeChatUIConfig', () => {
           label: 'Sonnet 4.5',
           description: 'Custom model (model)',
           environmentTypes: ['model'],
+          group: 'Claude',
+        },
+        {
+          value: 'claude-code/claude-opus-4-6',
+          label: 'Opus 4.6',
+          description: 'Custom model',
           group: 'Claude',
         },
       ]);

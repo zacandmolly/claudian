@@ -184,6 +184,69 @@ describe('CodexChatUIConfig', () => {
       expect(options.length).toBe(2);
     });
 
+    it('keeps an explicit visibleModels list from also showing other custom models', () => {
+      const options = codexChatUIConfig.getModelOptions({
+        providerConfigs: {
+          codex: {
+            customModels: 'gpt-5.3-codex-spark',
+            discoveredModels: [
+              {
+                model: 'gpt-6.1-sol',
+                displayName: 'GPT-6.1-Sol',
+                description: 'Workhorse',
+                supportedReasoningEfforts: [{ value: 'medium', description: 'Balanced' }],
+                defaultReasoningEffort: 'medium',
+                serviceTiers: [],
+                defaultServiceTier: null,
+                inputModalities: ['text', 'image'],
+                isDefault: true,
+              },
+              {
+                model: 'gpt-6-astra',
+                displayName: 'GPT-6-Astra',
+                description: 'Frontier',
+                supportedReasoningEfforts: [{ value: 'medium', description: 'Balanced' }],
+                defaultReasoningEffort: 'medium',
+                serviceTiers: [],
+                defaultServiceTier: null,
+                inputModalities: ['text', 'image'],
+                isDefault: false,
+              },
+              {
+                model: 'gpt-6-luna',
+                displayName: 'GPT-6-Luna',
+                description: 'Fast',
+                supportedReasoningEfforts: [{ value: 'medium', description: 'Balanced' }],
+                defaultReasoningEffort: 'medium',
+                serviceTiers: [],
+                defaultServiceTier: null,
+                inputModalities: ['text', 'image'],
+                isDefault: false,
+              },
+              {
+                model: 'gpt-6.1-terra',
+                displayName: 'GPT-6.1 Terra',
+                description: 'Terra',
+                supportedReasoningEfforts: [{ value: 'medium', description: 'Balanced' }],
+                defaultReasoningEffort: 'medium',
+                serviceTiers: [],
+                defaultServiceTier: null,
+                inputModalities: ['text', 'image'],
+                isDefault: false,
+              },
+            ],
+            visibleModels: ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-luna'],
+          },
+        },
+      });
+
+      expect(options.map(option => option.value)).toEqual([
+        'gpt-6-luna',
+        'gpt-6-astra',
+        'gpt-6.1-sol',
+      ]);
+    });
+
     it('only includes discovered models selected by the visibility filter', () => {
       const settings = withDiscoveredModels({
         settingsProvider: 'claude',
