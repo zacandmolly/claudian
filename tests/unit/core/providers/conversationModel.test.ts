@@ -7,6 +7,7 @@ import { ProviderRegistry } from '@/core/providers/ProviderRegistry';
 import type { ProviderChatUIConfig, ProviderId } from '@/core/providers/types';
 
 interface TestProviderConfig {
+  authoritativeCatalog?: boolean;
   defaultModel?: string | null;
   normalizations?: Record<string, string>;
   options: string[];
@@ -16,6 +17,7 @@ interface TestProviderConfig {
 function createUiConfig(config: TestProviderConfig): ProviderChatUIConfig {
   return {
     getModelOptions: () => config.options.map(value => ({ label: value, value })),
+    hasAuthoritativeModelCatalog: () => config.authoritativeCatalog ?? config.options.length > 0,
     getCustomModelIds: () => new Set(),
     getDefaultModel: () => config.defaultModel ?? null,
     ownsModel: model => config.options.includes(model),
@@ -252,6 +254,33 @@ describe('conversation model resolution', () => {
         shouldPersist: true,
         source: 'selected',
       });
+    });
+
+    it('preserves a stored selection while the provider catalog is only a display fallback', () => {
+      providers.codex.authoritativeCatalog = false;
+      providers.codex.options = ['gpt-6.1-sol', 'gpt-5.5'];
+
+      expect(resolveConversationModel(
+        {},
+        'codex',
+        { selectedModel: 'gpt-5.4-experimental' } as any,
+      )).toEqual({
+        model: 'gpt-5.4-experimental',
+        shouldPersist: false,
+        source: 'selected',
+      });
+      expect(resolveConversationModel(
+        {},
+        'codex',
+        { selectedModel: 'openai-codex/gpt-5.5' } as any,
+      )).toEqual({
+        model: 'openai-codex/gpt-5.5',
+        shouldPersist: false,
+        source: 'selected',
+      });
+
+      providers.codex.authoritativeCatalog = undefined;
+      providers.codex.options = ['codex/gpt-5', 'codex/gpt-5-mini'];
     });
 
     it('preserves a stored historical selection when the provider has no authoritative options', () => {

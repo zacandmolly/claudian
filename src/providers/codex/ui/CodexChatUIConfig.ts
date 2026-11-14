@@ -10,7 +10,7 @@ import type {
   ProviderUIOption,
 } from '../../../core/providers/types';
 import { OPENAI_PROVIDER_ICON } from '../../../shared/icons';
-import { getCodexModelOptions } from '../modelOptions';
+import { getCodexModelOptions, resolveCodexDefaultModelId } from '../modelOptions';
 import {
   CODEX_DEFAULT_SERVICE_TIER,
   CODEX_FALLBACK_REASONING_EFFORT_VALUES,
@@ -68,13 +68,18 @@ export const codexChatUIConfig: ProviderChatUIConfig = {
     return getCodexModelOptions(settings);
   },
 
-  getDefaultModel(settings: Record<string, unknown>): string | null {
+  hasAuthoritativeModelCatalog(settings: Record<string, unknown>): boolean {
     const codexSettings = getCodexProviderSettings(settings);
-    const firstVisibleModel = getVisibleCodexModelIds(
-      codexSettings.visibleModels,
-      codexSettings.discoveredModels,
-    ).find(modelId => getVisibleDiscoveredModels(settings).some(model => model.model === modelId));
-    return firstVisibleModel ?? getCodexModelOptions(settings)[0]?.value ?? null;
+    if (codexSettings.visibleModels !== null) {
+      return true;
+    }
+    return codexSettings.discoveredModels.some(model =>
+      isCodexModelAvailable(model, codexSettings.enableUltraEffort)
+    );
+  },
+
+  getDefaultModel(settings: Record<string, unknown>): string | null {
+    return resolveCodexDefaultModelId(settings);
   },
 
   ownsModel(model: string, settings: Record<string, unknown>): boolean {

@@ -254,11 +254,15 @@ describe('CodexChatUIConfig', () => {
         },
       });
 
-      expect(options).toEqual([]);
+      const values = options.map(option => option.value);
+      expect(values).toContain('gpt-6.1-sol');
+      expect(values).not.toContain('gpt-current-session');
+      expect(values).not.toContain('saved-custom-model');
+      expect(values).not.toContain('openai-codex/saved-custom-model');
     });
 
     it('does not treat another provider current model as a Codex fallback', () => {
-      expect(codexChatUIConfig.getModelOptions({
+      const values = codexChatUIConfig.getModelOptions({
         settingsProvider: 'claude',
         model: 'sonnet',
         providerConfigs: {
@@ -267,7 +271,10 @@ describe('CodexChatUIConfig', () => {
             visibleModels: null,
           },
         },
-      })).toEqual([]);
+      }).map(option => option.value);
+
+      expect(values).toContain('gpt-6.1-sol');
+      expect(values).not.toContain('sonnet');
     });
 
     it('deduplicates an unavailable current model against OPENAI_MODEL', () => {
@@ -282,11 +289,13 @@ describe('CodexChatUIConfig', () => {
         },
       });
 
-      expect(options).toEqual([{
+      expect(options[0]).toEqual({
         value: 'openai-codex/gpt-env-model',
         label: 'GPT-env Model',
         description: 'Custom (env)',
-      }]);
+      });
+      expect(options.filter(option => option.value.includes('gpt-env-model'))).toHaveLength(1);
+      expect(options.map(option => option.value)).toContain('gpt-6.1-sol');
     });
   });
 

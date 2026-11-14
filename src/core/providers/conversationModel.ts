@@ -199,11 +199,14 @@ export function resolveConversationModel(
   conversation?: Conversation | null,
 ): ConversationModelResolution {
   const rawSelectedModel = trimModel(conversation?.selectedModel);
-  const modelOptions = ProviderRegistry.getChatUIConfig(providerId).getModelOptions(settings);
+  const uiConfig = ProviderRegistry.getChatUIConfig(providerId);
+  const modelOptions = uiConfig.getModelOptions(settings);
+  const authoritativeCatalog = uiConfig.hasAuthoritativeModelCatalog?.(settings)
+    ?? modelOptions.length > 0;
   const selectedModel = rawSelectedModel
     ? findProviderModelOption(providerId, rawSelectedModel, settings)
     : null;
-  if (selectedModel) {
+  if (selectedModel && authoritativeCatalog) {
     return {
       model: selectedModel,
       source: 'selected',
@@ -212,7 +215,7 @@ export function resolveConversationModel(
   }
 
   if (rawSelectedModel) {
-    if (modelOptions.length === 0) {
+    if (!authoritativeCatalog) {
       return {
         model: rawSelectedModel,
         source: 'selected',

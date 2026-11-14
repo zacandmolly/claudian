@@ -268,6 +268,13 @@ export interface ProviderChatUIConfig {
   /** Model options for the selector dropdown. Provider extracts what it needs from the settings bag. */
   getModelOptions(settings: Record<string, unknown>): ProviderUIOption[];
 
+  /**
+   * False when `getModelOptions` is only a display fallback.
+   * Stored selections stay untouched until a discovered catalog can validate them.
+   * Omitted means any non-empty option list is authoritative.
+   */
+  hasAuthoritativeModelCatalog?(settings: Record<string, unknown>): boolean;
+
   /** Semantic default model, independent from selector display order. */
   getDefaultModel?(settings: Record<string, unknown>): string | null;
 

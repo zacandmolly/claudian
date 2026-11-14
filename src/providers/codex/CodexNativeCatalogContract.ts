@@ -155,7 +155,7 @@ const OFFERED_MODELS: readonly CodexNativeCatalogModel[] = [
 
 const OFFERED_BY_SLUG = new Map(OFFERED_MODELS.map(model => [model.model, model]));
 
-/** Upstream Codex bundled catalog default. Claudian applies it only when discovery marks it. */
+/** Upstream Codex bundled catalog default, and Claudian's Codex picker default when it is available. */
 export const CODEX_UPSTREAM_DEFAULT_MODEL_ID = 'gpt-6.1-sol';
 
 export function codexCatalogSlug(model: string): string {

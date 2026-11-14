@@ -3,8 +3,10 @@ import {
   resolvePreferredReasoningDefault,
 } from '../../core/providers/reasoning';
 import {
+  CODEX_UPSTREAM_DEFAULT_MODEL_ID,
   getCodexNativeCatalogModel,
   getCodexNativeContextWindow,
+  getOfferedCodexNativeCatalogModels,
   isRestrictedCodexCatalogModel,
 } from './CodexNativeCatalogContract';
 import { toCodexRuntimeModelId } from './modelSelection';
@@ -256,6 +258,19 @@ export function getCodexModelContextWindow(
     return discovered.contextWindow;
   }
   return getCodexNativeContextWindow(toCodexRuntimeModelId(modelId));
+}
+
+export function getCodexPublicFallbackCatalog(): CodexDiscoveredModel[] {
+  return getOfferedCodexNativeCatalogModels().map(model => {
+    const discovered = contractModelToDiscovered(model.model);
+    if (!discovered) {
+      return null;
+    }
+    return {
+      ...discovered,
+      isDefault: model.model === CODEX_UPSTREAM_DEFAULT_MODEL_ID,
+    };
+  }).filter((model): model is CodexDiscoveredModel => model !== null);
 }
 
 export function getDefaultCodexModel(

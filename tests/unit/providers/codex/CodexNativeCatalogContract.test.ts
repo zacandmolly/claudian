@@ -42,7 +42,16 @@ function wireModel(
 }
 
 describe('Codex native GPT catalog contract', () => {
-  it('offers the public Codex GPT ids and records the upstream default without applying it locally', () => {
+  it('uses gpt-6.1-sol as the default and fills an empty discovery result from the public catalog', () => {
+    const settings = {
+      providerConfigs: {
+        codex: {
+          discoveredModels: [],
+          visibleModels: null,
+        },
+      },
+    };
+
     expect(getOfferedCodexNativeCatalogModels().map(model => model.model)).toEqual([
       'gpt-6.1-sol',
       'gpt-6-astra',
@@ -55,22 +64,107 @@ describe('Codex native GPT catalog contract', () => {
       'gpt-5.5',
     ]);
     expect(CODEX_UPSTREAM_DEFAULT_MODEL_ID).toBe('gpt-6.1-sol');
-    expect(codexChatUIConfig.getDefaultModel?.({
+    expect(codexChatUIConfig.getDefaultModel?.(settings)).toBe('gpt-6.1-sol');
+    expect(codexChatUIConfig.getModelOptions(settings).map(option => option.value)).toEqual([
+      'gpt-5.5',
+      'gpt-5.6-luna',
+      'gpt-5.6-terra',
+      'gpt-6.1-terra',
+      'gpt-5.6-sol',
+      'gpt-6-luna',
+      'gpt-6-sol',
+      'gpt-6-astra',
+      'gpt-6.1-sol',
+    ]);
+    expect(codexChatUIConfig.getModelOptions(settings).map(option => option.value))
+      .not.toEqual(expect.arrayContaining(['gpt-6-cyber', 'gpt-daybreak-blue-latest', 'gpt-daybreak-red-latest']));
+  });
+
+  it('falls back to the discovered default when gpt-6.1-sol is absent', () => {
+    const settings = {
       providerConfigs: {
         codex: {
-          discoveredModels: [],
+          discoveredModels: [
+            wireModel('gpt-5.5', {
+              contextWindow: 272_000,
+              defaultReasoningEffort: 'medium',
+              efforts: GPT_55_EFFORTS,
+              isDefault: true,
+            }),
+            wireModel('gpt-5.6-luna', {
+              contextWindow: 272_000,
+              defaultReasoningEffort: 'medium',
+              efforts: LUNA_EFFORTS,
+            }),
+          ],
           visibleModels: null,
         },
       },
-    })).toBeNull();
-    expect(codexChatUIConfig.getModelOptions({
+    };
+
+    expect(codexChatUIConfig.getDefaultModel?.(settings)).toBe('gpt-5.5');
+    expect(codexChatUIConfig.getModelOptions(settings).map(option => option.value)).toEqual([
+      'gpt-5.6-luna',
+      'gpt-5.5',
+    ]);
+  });
+
+  it('prefers an available gpt-6.1-sol over another app-server default', () => {
+    const settings = {
       providerConfigs: {
         codex: {
-          discoveredModels: [],
+          discoveredModels: [
+            wireModel('gpt-5.5', {
+              contextWindow: 272_000,
+              defaultReasoningEffort: 'medium',
+              efforts: GPT_55_EFFORTS,
+              isDefault: true,
+            }),
+            wireModel('gpt-6.1-sol', {
+              contextWindow: 272_000,
+              defaultReasoningEffort: 'low',
+              efforts: PUBLIC_EFFORTS,
+            }),
+          ],
           visibleModels: null,
         },
       },
-    })).toEqual([]);
+    };
+
+    expect(codexChatUIConfig.getDefaultModel?.(settings)).toBe('gpt-6.1-sol');
+    expect(codexChatUIConfig.getModelOptions(settings).map(option => option.value)).toEqual([
+      'gpt-6.1-sol',
+      'gpt-5.5',
+    ]);
+  });
+
+  it('skips an unavailable gpt-6.1-sol and keeps another discovered model selectable', () => {
+    const settings = {
+      providerConfigs: {
+        codex: {
+          discoveredModels: [
+            wireModel('gpt-6.1-sol', {
+              contextWindow: 272_000,
+              defaultReasoningEffort: 'ultra',
+              efforts: ['ultra'],
+              isDefault: true,
+            }),
+            wireModel('gpt-5.5', {
+              contextWindow: 272_000,
+              defaultReasoningEffort: 'medium',
+              efforts: GPT_55_EFFORTS,
+            }),
+          ],
+          enableUltraEffort: false,
+          visibleModels: null,
+        },
+      },
+    };
+
+    expect(codexChatUIConfig.getDefaultModel?.(settings)).toBe('gpt-5.5');
+    expect(codexChatUIConfig.getModelOptions(settings).map(option => option.value)).toEqual([
+      'gpt-5.5',
+    ]);
   });
 
   it('normalizes a discovered GPT-6 catalog without offering Cyber or Daybreak models', () => {
@@ -200,7 +294,7 @@ describe('Codex native GPT catalog contract', () => {
   });
 
   it('leaves an explicit custom GPT-6 Cyber id available without discovering it', () => {
-    expect(codexChatUIConfig.getModelOptions({
+    const values = codexChatUIConfig.getModelOptions({
       providerConfigs: {
         codex: {
           customModels: 'gpt-6-cyber',
@@ -208,10 +302,12 @@ describe('Codex native GPT catalog contract', () => {
           visibleModels: null,
         },
       },
-    })).toEqual([{
-      value: 'openai-codex/gpt-6-cyber',
-      label: 'GPT-6 Cyber',
-      description: 'Custom model',
-    }]);
+    }).map(option => option.value);
+
+    expect(values).toContain('openai-codex/gpt-6-cyber');
+    expect(values).toContain('gpt-6.1-sol');
+    expect(values.filter(value => value.includes('cyber') || value.includes('daybreak'))).toEqual([
+      'openai-codex/gpt-6-cyber',
+    ]);
   });
 });
