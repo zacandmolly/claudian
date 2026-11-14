@@ -40,6 +40,18 @@ describe('claudeChatUIConfig', () => {
         },
       })).toBe('claude-code/claude-sonnet-gateway');
     });
+
+    it('keeps configured fallback order independent from visual menu grouping', () => {
+      expect(claudeChatUIConfig.getDefaultModel?.({
+        providerConfigs: {
+          claude: {
+            showDefaultModels: false,
+            defaultModel: 'retired-model',
+            customModels: 'claude-opus-4.8\nopenai/gpt-5.6-terra',
+          },
+        },
+      })).toBe('claude-code/claude-opus-4.8');
+    });
   });
 
   it('defaults Claude models to high effort', () => {
@@ -70,12 +82,30 @@ describe('claudeChatUIConfig', () => {
           value: 'claude-code/claude-opus-4-6',
           label: 'Opus 4.6',
           description: 'Custom model',
+          group: 'Claude',
         },
         {
           value: 'claude-code/claude-opus-4-6[1m]',
           label: 'Opus 4.6 (1M)',
           description: 'Custom model',
+          group: 'Claude',
         },
+      ]);
+    });
+
+    it('keeps configured custom models while built-in defaults are disabled', () => {
+      const options = claudeChatUIConfig.getModelOptions({
+        providerConfigs: {
+          claude: {
+            showDefaultModels: false,
+            customModels: 'deepseek-v4-flash-vision-exp\nclaude-opus-4-8',
+          },
+        },
+      });
+
+      expect(options.map(option => option.value)).toEqual([
+        'claude-code/deepseek-v4-flash-vision-exp',
+        'claude-code/claude-opus-4-8',
       ]);
     });
 
@@ -110,6 +140,7 @@ describe('claudeChatUIConfig', () => {
         value: 'claude-code/claude-opus-4-5-20251101',
         label: 'Opus 4.5 (2511)',
         description: 'Custom model',
+        group: 'Claude',
       });
     });
 
@@ -126,6 +157,7 @@ describe('claudeChatUIConfig', () => {
         value: 'claude-code/claude-fable-6',
         label: 'Fable 6',
         description: 'Custom model',
+        group: 'Claude',
       });
     });
 
@@ -145,6 +177,7 @@ describe('claudeChatUIConfig', () => {
         value: 'claude-code/claude-opus-4-6',
         label: 'Work Opus',
         description: 'Custom model',
+        group: 'Claude',
       });
     });
 
@@ -164,6 +197,7 @@ describe('claudeChatUIConfig', () => {
           label: 'Sonnet 4.5',
           description: 'Custom model (model)',
           environmentTypes: ['model'],
+          group: 'Claude',
         },
       ]);
     });
@@ -186,6 +220,7 @@ describe('claudeChatUIConfig', () => {
           label: 'Gateway Sonnet',
           description: 'Custom model (model)',
           environmentTypes: ['model'],
+          group: 'Claude',
         },
       ]);
     });
@@ -223,6 +258,14 @@ describe('claudeChatUIConfig', () => {
         'max',
       ]);
       expect(options.some(option => option.tokens !== undefined)).toBe(false);
+    });
+
+    it('exposes only high and max effort for DeepSeek routes', () => {
+      const options = claudeChatUIConfig.getReasoningOptions('deepseek-v4-flash', {});
+
+      expect(options.map(option => option.value)).toEqual(['high', 'max']);
+      expect(claudeChatUIConfig.isAdaptiveReasoningModel('deepseek-v4-flash', {})).toBe(true);
+      expect(claudeChatUIConfig.isAdaptiveReasoningModel('openrouter/fusion', {})).toBe(false);
     });
   });
 

@@ -255,7 +255,7 @@ implements ClaudeExecutionStrategy {
       await query.setModel(request.model);
       if (this.query !== query || this.disposed) return;
     }
-    if (request.effort !== current.effort) {
+    if (request.effort && request.effort !== current.effort) {
       await query.applyFlagSettings({ effortLevel: request.effort });
       if (this.query !== query || this.disposed) return;
     }

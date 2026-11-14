@@ -5,6 +5,7 @@ import * as path from 'path';
 import type {
   ProviderCapabilities,
   ProviderChatUIConfig,
+  ProviderId,
   ProviderModeSelectorConfig,
   ProviderPermissionModeToggleConfig,
   ProviderReasoningOption,
@@ -49,7 +50,7 @@ export interface ToolbarSettings {
 }
 
 export interface ToolbarCallbacks {
-  onModelChange: (model: string) => Promise<void>;
+  onModelChange: (model: string, sourceProviderId?: ProviderId) => Promise<void>;
   onModeChange: (mode: string) => Promise<void>;
   onThinkingBudgetChange: (budget: string) => Promise<void>;
   onEffortLevelChange: (effort: string) => Promise<void>;
@@ -157,7 +158,11 @@ export class ModelSelector {
       option.addEventListener('click', (e) => {
         e.stopPropagation();
         runToolbarAction(async () => {
-          await this.callbacks.onModelChange(model.value);
+          if (model.providerId) {
+            await this.callbacks.onModelChange(model.value, model.providerId);
+          } else {
+            await this.callbacks.onModelChange(model.value);
+          }
           this.updateDisplay();
           this.renderOptions();
         }, 'Failed to change model');

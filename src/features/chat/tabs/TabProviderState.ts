@@ -8,6 +8,7 @@ import {
   resolveConversationModel,
 } from '../../../core/providers/conversationModel';
 import { getEnabledProviderForModel } from '../../../core/providers/modelRouting';
+import { toProviderRuntimeModelId } from '../../../core/providers/modelSelection';
 import { ProviderRegistry } from '../../../core/providers/ProviderRegistry';
 import { ProviderSettingsCoordinator } from '../../../core/providers/ProviderSettingsCoordinator';
 import { ProviderWorkspaceRegistry } from '../../../core/providers/ProviderWorkspaceRegistry';
@@ -39,17 +40,76 @@ export type TabProviderSettings = Record<string, unknown> & {
   customContextLimits?: Record<string, number>;
 };
 
+interface BlankTabModelOption {
+  option: ProviderUIOption;
+  providerId: ProviderId;
+}
+
+function getNativeCodexGptIdentity(
+  providerId: ProviderId,
+  model: string,
+): string | null {
+  if (providerId !== 'codex') {
+    return null;
+  }
+
+  const runtimeModel = toProviderRuntimeModelId(providerId, model)
+    .trim()
+    .toLowerCase();
+  return runtimeModel.startsWith('gpt-') ? runtimeModel : null;
+}
+
+function getClaudeGatewayGptIdentity(
+  providerId: ProviderId,
+  model: string,
+): string | null {
+  if (providerId !== 'claude') {
+    return null;
+  }
+
+  const runtimeModel = toProviderRuntimeModelId(providerId, model)
+    .trim()
+    .toLowerCase();
+  if (runtimeModel.startsWith('openai/gpt-')) {
+    return runtimeModel.slice('openai/'.length);
+  }
+
+  return runtimeModel.startsWith('gpt-') ? runtimeModel : null;
+}
+
 export function getBlankTabModelOptions(
   settings: Record<string, unknown>,
 ): ProviderUIOption[] {
-  return ProviderRegistry.getEnabledProviderIds(settings).flatMap((providerId) => {
-    const uiConfig = ProviderRegistry.getChatUIConfig(providerId);
-    const providerIcon = uiConfig.getProviderIcon?.() ?? undefined;
-    const group = ProviderRegistry.getProviderDisplayName(providerId);
+  const models: BlankTabModelOption[] = ProviderRegistry
+    .getEnabledProviderIds(settings)
+    .flatMap((providerId) => {
+      const uiConfig = ProviderRegistry.getChatUIConfig(providerId);
+      const providerIcon = uiConfig.getProviderIcon?.() ?? undefined;
+      const group = ProviderRegistry.getProviderDisplayName(providerId);
 
-    return uiConfig.getModelOptions(settings)
-      .map(model => ({ ...model, group, providerIcon }));
-  });
+      return uiConfig.getModelOptions(settings)
+        .map(model => ({
+          providerId,
+          option: {
+            ...model,
+            group: model.group ?? group,
+            providerIcon: model.providerIcon ?? providerIcon,
+            providerId,
+          },
+        }));
+    });
+
+  const nativeCodexGptModels = new Set(models
+    .map(({ option, providerId }) => getNativeCodexGptIdentity(providerId, option.value))
+    .filter((model): model is string => model !== null));
+
+  // Prefer an exact native Codex entry, but retain gateway-only GPT routes as fallbacks.
+  return models
+    .filter(({ option, providerId }) => {
+      const gatewayModel = getClaudeGatewayGptIdentity(providerId, option.value);
+      return !gatewayModel || !nativeCodexGptModels.has(gatewayModel);
+    })
+    .map(({ option }) => option);
 }
 
 export function getTabCapabilities(

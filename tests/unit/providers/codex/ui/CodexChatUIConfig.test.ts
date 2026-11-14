@@ -1,5 +1,6 @@
 import { CODEX_SPARK_MODEL, TEST_CODEX_MODEL } from '@test/helpers/codexModels';
 
+import { normalizeCodexDiscoveredModels } from '@/providers/codex/models';
 import { codexChatUIConfig } from '@/providers/codex/ui/CodexChatUIConfig';
 
 const DISCOVERED_MODELS = [
@@ -605,6 +606,77 @@ describe('CodexChatUIConfig', () => {
     it('should return empty set when no OPENAI_MODEL', () => {
       const ids = codexChatUIConfig.getCustomModelIds({});
       expect(ids.size).toBe(0);
+    });
+  });
+
+  describe('GPT-5.6 native catalog contract', () => {
+    it('uses Sol, Terra, and Luna metadata without static duplicates or an Ultra default change', () => {
+      const baseEfforts = ['low', 'medium', 'high', 'xhigh', 'max'];
+      const discoveredModels = normalizeCodexDiscoveredModels([
+        { model: 'gpt-5.6-sol', supportsUltra: true },
+        { model: 'gpt-5.6-terra', supportsUltra: true },
+        { model: 'gpt-5.6-luna', supportsUltra: false },
+      ].map(({ model, supportsUltra }, index) => ({
+        id: model,
+        displayName: model,
+        description: 'Native app-server model',
+        supportedReasoningEfforts: [
+          ...baseEfforts,
+          ...(supportsUltra ? ['ultra'] : []),
+        ].map(reasoningEffort => ({ reasoningEffort, description: reasoningEffort })),
+        defaultReasoningEffort: 'medium',
+        serviceTiers: [{ id: 'priority', name: 'Fast', description: '1.5x speed' }],
+        defaultServiceTier: null,
+        inputModalities: ['text', 'image'],
+        isDefault: index === 0,
+      })));
+      const settings = {
+        model: 'gpt-5.6-terra',
+        serviceTier: 'fast',
+        providerConfigs: {
+          codex: {
+            discoveredModels,
+            enableUltraEffort: false,
+            visibleModels: null,
+          },
+        },
+      };
+
+      const modelIds = codexChatUIConfig.getModelOptions(settings)
+        .map(option => option.value);
+      expect(modelIds).toHaveLength(3);
+      expect(new Set(modelIds)).toEqual(new Set([
+        'gpt-5.6-sol',
+        'gpt-5.6-terra',
+        'gpt-5.6-luna',
+      ]));
+
+      for (const model of discoveredModels) {
+        expect(codexChatUIConfig.getReasoningOptions(model.model, settings)
+          .map(option => option.value)).toEqual(baseEfforts);
+        expect(codexChatUIConfig.getReasoningOptions(model.model, {
+          ...settings,
+          providerConfigs: {
+            codex: {
+              ...settings.providerConfigs.codex,
+              enableUltraEffort: true,
+            },
+          },
+        }).map(option => option.value)).toEqual([
+          ...baseEfforts,
+          ...(model.model === 'gpt-5.6-luna' ? [] : ['ultra']),
+        ]);
+        expect(codexChatUIConfig.getServiceTierToggle!({
+          ...settings,
+          model: model.model,
+        })).toMatchObject({
+          activeValue: 'priority',
+          activeLabel: 'Fast',
+          isActive: true,
+        });
+      }
+
+      expect(settings.providerConfigs.codex.enableUltraEffort).toBe(false);
     });
   });
 

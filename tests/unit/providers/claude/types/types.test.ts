@@ -18,6 +18,7 @@ import {
   normalizeEffortLevel,
   normalizeLegacyClaudeModelAlias,
   resolveContextWindowSize,
+  supportsClaudeAdaptiveThinking,
   supportsXHighEffort,
 } from '@/providers/claude/types/models';
 import {
@@ -616,6 +617,7 @@ describe('types.ts', () => {
       expect(getContextWindowSize('claude-sonnet-5')).toBe(CONTEXT_WINDOW_1M);
       expect(getContextWindowSize('claude-opus-4-5')).toBe(CONTEXT_WINDOW_STANDARD);
       expect(getContextWindowSize('claude-sonnet-4-5')).toBe(CONTEXT_WINDOW_STANDARD);
+      expect(getContextWindowSize('claude-opus-4.8')).toBe(CONTEXT_WINDOW_1M);
     });
 
     it('should use custom limits when provided', () => {
@@ -776,6 +778,28 @@ describe('types.ts', () => {
       expect(supportsXHighEffort('fable')).toBe(true);
       expect(supportsXHighEffort('claude-fable-5')).toBe(true);
       expect(supportsXHighEffort('claude-fable-6')).toBe(true);
+    });
+
+    it('limits DeepSeek Claude-adapter models to their supported range', () => {
+      expect(supportsXHighEffort('deepseek-v4-pro')).toBe(false);
+      expect(normalizeEffortLevel('deepseek-v4-pro', 'low')).toBe('high');
+      expect(normalizeEffortLevel('deepseek-v4-pro', 'xhigh')).toBe('high');
+      expect(normalizeEffortLevel('deepseek-v4-pro', 'max')).toBe('max');
+    });
+  });
+
+  describe('supportsClaudeAdaptiveThinking', () => {
+    it('keeps adaptive thinking for Claude and DeepSeek routes', () => {
+      expect(supportsClaudeAdaptiveThinking('opus')).toBe(true);
+      expect(supportsClaudeAdaptiveThinking('anthropic/claude-opus-4.8')).toBe(true);
+      expect(supportsClaudeAdaptiveThinking('deepseek-v4-flash')).toBe(true);
+    });
+
+    it('omits Claude-native flags for incompatible gateway models', () => {
+      expect(supportsClaudeAdaptiveThinking('kimi-k3[1m]')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('openrouter/fusion')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('openai/gpt-5.6-terra')).toBe(false);
+      expect(supportsClaudeAdaptiveThinking('anthropic/not-a-claude-model')).toBe(false);
     });
   });
 

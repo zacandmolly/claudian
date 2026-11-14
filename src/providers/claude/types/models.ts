@@ -61,7 +61,7 @@ function parseVersionedClaudeModel(model: string): VersionedClaudeModel | null {
   const canonicalStart = normalized.indexOf('claude-');
   const canonical = canonicalStart >= 0 ? normalized.slice(canonicalStart) : normalized;
   const match = canonical.match(
-    new RegExp(`^claude-(${CLAUDE_MODEL_TIER_PATTERN})-(\\d+)(?:-(\\d+))?`),
+    new RegExp(`^claude-(${CLAUDE_MODEL_TIER_PATTERN})-(\\d+)(?:[-.](\\d+))?`),
   );
   if (!match) {
     return null;
@@ -114,6 +114,9 @@ export function isDefaultClaudeModel(model: string): boolean {
  */
 export function supportsXHighEffort(model: string): boolean {
   const normalized = normalizeModelId(model);
+  if (isDeepSeekModel(normalized)) {
+    return false;
+  }
   const aliasTier = resolveClaudeModelTierAlias(normalized);
   if (aliasTier) {
     return getClaudeModelTierDefinition(aliasTier).aliasSupportsXHigh;
@@ -131,11 +134,56 @@ export function supportsXHighEffort(model: string): boolean {
   );
 }
 
+function getProviderQualifiedModelParts(
+  model: string,
+): { provider: string; slug: string } | null {
+  const normalized = normalizeModelId(model).replace(/\[1m\]$/, '');
+  const slashIndex = normalized.indexOf('/');
+  return slashIndex === -1
+    ? null
+    : {
+      provider: normalized.slice(0, slashIndex),
+      slug: normalized.slice(slashIndex + 1),
+    };
+}
+
+function isDeepSeekModel(model: string): boolean {
+  const normalized = normalizeModelId(model).replace(/\[1m\]$/, '');
+  const parts = getProviderQualifiedModelParts(normalized);
+  const slug = parts?.slug ?? normalized;
+  return parts?.provider === 'deepseek' || slug.includes('deepseek');
+}
+
+/** Whether the Claude adapter may send native adaptive-thinking flags. */
+export function supportsClaudeAdaptiveThinking(model: string): boolean {
+  const normalized = normalizeModelId(model);
+  if (!normalized) {
+    return false;
+  }
+  if (isDeepSeekModel(normalized)) {
+    return true;
+  }
+  if (normalized.replace(/\[1m\]$/, '').startsWith('kimi-')) {
+    return false;
+  }
+  if (resolveClaudeModelTierAlias(normalized)) {
+    return true;
+  }
+  const parts = getProviderQualifiedModelParts(normalized);
+  if (!parts) {
+    return true;
+  }
+  return parts.slug.startsWith('claude-') || parts.slug.includes('/claude-');
+}
+
 /** Clamp stored effort values to what the selected model actually supports. */
 export function normalizeEffortLevel(
   model: string,
   effortLevel: unknown,
 ): EffortLevel {
+  if (isDeepSeekModel(model)) {
+    return effortLevel === 'max' ? 'max' : 'high';
+  }
   const allowsXHigh = supportsXHighEffort(model);
   const isSupported = EFFORT_LEVELS.some((level) =>
     level.value === effortLevel && (allowsXHigh || level.value !== 'xhigh')

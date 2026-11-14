@@ -316,6 +316,24 @@ describe('ModelSelector', () => {
     expect(callbacks.onModelChange).toHaveBeenCalledWith('opus');
   });
 
+  it('should carry mixed-picker provider ownership through model selection', async () => {
+    const uiConfig = createMockUIConfig();
+    uiConfig.getModelOptions.mockReturnValue([
+      {
+        value: 'gpt-5.6-terra',
+        label: 'GPT-5.6 Terra',
+        providerId: 'codex',
+      },
+    ]);
+    callbacks.getUIConfig.mockReturnValue(uiConfig);
+    selector.renderOptions();
+
+    const option = parentEl.querySelector('.claudian-model-dropdown')?.children[0];
+    await option?.dispatchEvent('click', { stopPropagation: () => {} });
+
+    expect(callbacks.onModelChange).toHaveBeenCalledWith('gpt-5.6-terra', 'codex');
+  });
+
   it('should always show brand color on model button', () => {
     const btn = parentEl.querySelector('.claudian-model-btn');
     expect(btn).toBeTruthy();

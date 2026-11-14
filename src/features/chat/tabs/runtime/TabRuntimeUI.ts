@@ -4,10 +4,8 @@ import {
   getProviderSettingsSnapshotWithModel,
   normalizeProviderModelSelection,
 } from '../../../../core/providers/conversationModel';
-import {
-  getEnabledProviderForModel,
-  getProviderForModel,
-} from '../../../../core/providers/modelRouting';
+import { getEnabledProviderForModel } from '../../../../core/providers/modelRouting';
+import { decodeProviderModelSelectionId } from '../../../../core/providers/modelSelection';
 import { ProviderRegistry } from '../../../../core/providers/ProviderRegistry';
 import type {
   ProviderChatUIConfig,
@@ -274,13 +272,21 @@ function buildInputToolbar(
     getCapabilities: () => getTabCapabilities(shell, plugin),
     getSettings: () => getTabSettingsSnapshot(shell, plugin),
     getEnvironmentVariables: () => plugin.getActiveEnvironmentVariables(),
-    onModelChange: async (model: string) => {
+    onModelChange: async (model: string, sourceProviderId?: ProviderId) => {
       const tab = runtimeRef.requirePublished();
       if (!options.isRuntimeLive(tab)) return;
       if (tab.conversationId === null) {
+        if (
+          sourceProviderId
+          && !ProviderRegistry.isEnabled(sourceProviderId, plugin.settings)
+        ) {
+          new Notice('That model provider is no longer enabled. Refresh the model list and try again.');
+          tab.ui.modelSelector.updateDisplay();
+          return;
+        }
         const selectionIntent = plugin.chatModelSelection.beginIntent();
         const request = modelSelection.beginRequest();
-        const newProvider = getEnabledProviderForModel(
+        const newProvider = sourceProviderId ?? getEnabledProviderForModel(
           model,
           plugin.settings,
         );
@@ -327,22 +333,38 @@ function buildInputToolbar(
       }
 
       const boundProvider = tab.providerId;
-      const modelProvider = getProviderForModel(model, plugin.settings);
-      if (modelProvider !== boundProvider) {
+      const explicitProvider = decodeProviderModelSelectionId(model)?.providerId;
+      if (
+        (sourceProviderId && sourceProviderId !== boundProvider)
+        || (explicitProvider && explicitProvider !== boundProvider)
+      ) {
         new Notice('Cannot switch provider on a bound session. Start a new conversation instead.');
         tab.ui.modelSelector.updateDisplay();
         return;
+      }
+      const normalizedBoundModel = normalizeProviderModelSelection(
+        boundProvider,
+        plugin.settings,
+        model,
+      );
+      if (!normalizedBoundModel) {
+        const modelProvider = getEnabledProviderForModel(
+          model,
+          plugin.settings,
+          boundProvider,
+        );
+        if (modelProvider !== boundProvider) {
+          new Notice('Cannot switch provider on a bound session. Start a new conversation instead.');
+          tab.ui.modelSelector.updateDisplay();
+          return;
+        }
       }
       const selectionIntent = plugin.chatModelSelection.beginIntent();
       const request = modelSelection.beginRequest();
       const conversationId = tab.conversationId;
 
       const uiConfig: ProviderChatUIConfig = getTabChatUIConfig(tab, plugin);
-      const normalizedModel = normalizeProviderModelSelection(
-        boundProvider,
-        plugin.settings,
-        model,
-      ) ?? model;
+      const normalizedModel = normalizedBoundModel ?? model;
       const providerSettings = getProviderSettingsSnapshotWithModel(
         plugin.settings,
         boundProvider,
